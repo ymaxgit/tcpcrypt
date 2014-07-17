@@ -309,18 +309,9 @@ static void init_algo(struct tc *tc, struct crypt_sym *cs,
 
 	cs = *algo;
 
-	crypt_set_key(cs->cs_cipher, keys->tk_enc.s_data, keys->tk_enc.s_len);
-	crypt_set_key(cs->cs_mac, keys->tk_mac.s_data, keys->tk_mac.s_len);
-	crypt_set_key(cs->cs_ack_mac, keys->tk_ack.s_data, keys->tk_ack.s_len);
-}
+	assert(keys->tk_prk.s_len >= cs->cs_key_len);
 
-static void compute_asm_keys(struct tc *tc, struct tc_keys *tk)
-{
-	set_expand_key(tc, &tk->tk_prk);
-
-	do_expand(tc, CONST_KEY_ENC, &tk->tk_enc);
-	do_expand(tc, CONST_KEY_MAC, &tk->tk_mac);
-	do_expand(tc, CONST_KEY_ACK, &tk->tk_ack);
+	crypt_set_key(cs->cs_cipher, keys->tk_prk.s_data, cs->cs_key_len);
 }
 
 static void compute_keys(struct tc *tc, struct tc_keyset *out)
@@ -335,9 +326,6 @@ static void compute_keys(struct tc *tc, struct tc_keyset *out)
 	do_expand(tc, CONST_KEY_S, &out->tc_server.tk_prk);
 
 	profile_add(1, "compute keys calculated keys");
-
-	compute_asm_keys(tc, &out->tc_client);
-	compute_asm_keys(tc, &out->tc_server);
 
 	switch (tc->tc_role) {
 	case ROLE_CLIENT:
@@ -1140,42 +1128,6 @@ static int do_output_init2_sent(struct tc *tc, struct ip *ip,
 	return DIVERT_ACCEPT;
 }
 
-static void compute_mac(struct tc *tc, void *data, int len,
-			void *iv, void *out, int dir_in)
-{
-	struct iovec iov[32];
-	int num = 0;
-	int maclen;
-	struct crypt_sym *cs = dir_in ? tc->tc_key_active->tc_alg_rx
-				      : tc->tc_key_active->tc_alg_tx;
-
-	/* IV */
-	if (tc->tc_mac_ivlen) {
-		if (!iv) {
-			assert(!"implement");
-//			crypto_next_iv(tc, out, &tc->tc_mac_ivlen);
-			iv = out;
-			out = (void*) ((unsigned long) out + tc->tc_mac_ivlen);
-		}
-
-		iov[num].iov_base  = iv;
-		iov[num++].iov_len = tc->tc_mac_ivlen;
-	} else
-		assert(!iv);
-
-	/* payload */
-	assert(num < sizeof(iov) / sizeof(*iov));
-	iov[num].iov_len = len;
-	if (iov[num].iov_len)
-		iov[num++].iov_base = data;
-
-	maclen = tc->tc_mac_size;
-
-	profile_add(2, "compute_mac pre");
-	crypt_mac(cs->cs_mac, iov, num, out, &maclen);
-	profile_add(2, "compute_mac MACed");
-}
-
 static void *get_iv(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
 	static uint64_t seq;
@@ -1269,17 +1221,13 @@ static int encrypt_and_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	if (tcp->th_flags & TH_URG)
 		flags->tf_urp[0] = tcp->th_urp;
 
-	crypt_encrypt(c, iv, data + sizeof(*record),
-		      dlen + head - sizeof(*record));
-
-	profile_add(1, "do_output post sym encrypt");
-
 	mac = data + tcp_data_len(ip, tcp) - maclen;
 
-	compute_mac(tc, record, (unsigned long) mac - (unsigned long) record,
-		    NULL, mac, 0);
+	c->c_aead_encrypt(c, iv, record, sizeof(*record),
+			  data + sizeof(*record), dlen + head - sizeof(*record),
+			  mac);
 
-	profile_add(1, "post add mac");
+	profile_add(1, "do_output post sym encrypt and mac");
 
 	return 0;
 }
@@ -2344,67 +2292,6 @@ static int do_input_init1_sent(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	return DIVERT_MODIFY;
 }
 
-static int check_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
-{
-	int macsize = tc->tc_mac_size + tc->tc_mac_ivlen;
-	int len = tcp_data_len(ip, tcp);
-	int dlen;
-	struct tc_record *record = tcp_data(tcp);
-	uint8_t *mac, *computed_mac;
-
-	if (len == 0)
-		return 0;
-
-	/* sanity check record */
-	if (len < sizeof(*record))
-		return -1;
-
-	dlen = len - sizeof(*record);
-
-	if (dlen != ntohs(record->tr_len))
-		return -1;
-
-	if (record->tr_control != 0)
-		return -1;
-
-	if (dlen < macsize)
-		return -1;
-
-	dlen -= macsize;
-
-	assert(dlen > 0);
-
-	mac = record->tr_data + dlen;
-
-	computed_mac = alloca(tc->tc_mac_size);
-
-	assert(computed_mac);
-
-	/* check mac */
-	compute_mac(tc, record, len - macsize, tc->tc_mac_ivlen ? mac : NULL,
-		    computed_mac, 1);
-
-	if (memcmp(&mac[tc->tc_mac_ivlen], computed_mac, tc->tc_mac_size) != 0)
-		return -2;
-
-	return 0;
-}
-
-static int decrypt(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
-{
-	struct tc_record *record = tcp_data(tcp);
-	int dlen = tcp_data_len(ip, tcp) - sizeof(*record);
-	void *iv = NULL;
-	struct crypt *c = tc->tc_key_active->tc_alg_rx->cs_cipher;
-
-	iv = get_iv(tc, ip, tcp);
-
-	if (dlen > 0)
-		crypt_decrypt(c, iv, record->tr_data, dlen);
-
-	return dlen;
-}
-
 static struct tco_rekeystream *rekey_input(struct tc *tc, struct ip *ip,
 					   struct tcphdr *tcp)
 {
@@ -2477,24 +2364,44 @@ static int check_mac_and_decrypt(struct tc *tc, struct ip *ip,
 {
 	int rc;
 	struct tc_flags *flags;
-	uint8_t *data = tcp_data(tcp);
+	struct tc_record *record = tcp_data(tcp);
 	int len = tcp_data_len(ip, tcp);
 	int maclen = tc->tc_mac_size + tc->tc_mac_ivlen;
 	uint8_t *clear;
+	struct crypt *c = tc->tc_key_active->tc_alg_rx->cs_cipher;
+	uint8_t *data = (uint8_t*) (record + 1);
+	uint8_t *mac = ((uint8_t*) record) + len - maclen;
+	void *iv = get_iv(tc, ip, tcp);
+	int dlen;
 
 	if (len == 0)
 		return 0;
 
-	profile_add(1, "do_input pre check_mac");
+	/* basic length check */
+	if (len < (sizeof(*record) + maclen))
+		return -1;
 
-	if ((rc = check_mac(tc, ip, tcp))) {
-		xprintf(XP_ALWAYS, "MAC failed %d\n", rc);
+	/* check MAC and decrypt */
+	profile_add(1, "do_input pre check_mac and decrypt");
+
+	rc = c->c_aead_decrypt(c, iv, record, sizeof(*record),
+			      data, len - sizeof(*record) - maclen,
+			      mac);
+
+	profile_add(1, "do_input post check_mac and decrypt");
+
+	if (rc == -1) {
+		xprintf(XP_ALWAYS, "MAC check failed\n");
 
 		if (_conf.cf_debug)
 			abort();
 
 		return -1;
-	} else if (tc->tc_sess) {
+	}
+
+	/* MAC passed */
+
+	if (tc->tc_sess) {
 		/* When we receive the first MACed packet, we know the other
 		 * side is setup so we can cache this session.
 		 */
@@ -2502,37 +2409,46 @@ static int check_mac_and_decrypt(struct tc *tc, struct ip *ip,
 		tc->tc_sess	     = NULL;
 	}
 
-	profile_add(1, "do_input post check_mac");
+	/* check record */
+	dlen = len - sizeof(*record);
 
-	decrypt(tc, ip, tcp);
+	if (dlen != ntohs(record->tr_len))
+		return -1;
 
-	profile_add(1, "do_input post decrypt");
+	if (record->tr_control != 0)
+		return -1;
 
-	len -= maclen;
-	len -= sizeof(struct tc_record);
-	len -= sizeof(*flags);
+	if (dlen < maclen)
+		return -1;
 
-	if (len < 0) {
+	dlen -= maclen;
+
+	assert(dlen > 0);
+
+	/* check flags */
+	dlen -= sizeof(*flags);
+
+	if (dlen < 0) {
 		xprintf(XP_ALWAYS, "Short packet\n");
 		return -1;
 	}
 
-	flags = (struct tc_flags*) (data + sizeof(struct tc_record));
+	flags = (struct tc_flags*) (record + 1);
 	clear = (uint8_t*) (flags + 1);
 
 	if (flags->tf_flags & TCF_URG) {
-		len   -= 2;
+		dlen  -= 2;
 		clear += 2;
 
-		if (len < 0) {
+		if (dlen < 0) {
 			xprintf(XP_ALWAYS, "Short packett\n");
 			return -1;
 		}
 	}
 
-	/* remove record & MAC */
-	memmove(data, clear, len);
-	set_ip_len(ip, (ip->ip_hl * 4) + (tcp->th_off * 4) + len);
+	/* remove record, flags, MAC */
+	memmove(record, clear, dlen);
+	set_ip_len(ip, (ip->ip_hl * 4) + (tcp->th_off * 4) + dlen);
 
 	return 0;
 }

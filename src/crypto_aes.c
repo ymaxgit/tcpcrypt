@@ -18,6 +18,8 @@
 
 struct aes_priv {
 	EVP_CIPHER_CTX		ap_ctx;
+	uint8_t			ap_key[1024];
+	int			ap_key_len;
 };
 
 /* XXX move CTR / ASM mode outside of AES-specific implementation */
@@ -136,9 +138,10 @@ static int aes_set_key(struct crypt *c, void *key, int len)
 {
 	struct aes_priv *ap = crypt_priv(c);
 
-	assert(len >= 16);
-	if (!EVP_EncryptInit(&ap->ap_ctx, EVP_aes_128_ecb(), key, NULL))
-		errssl(1, "EVP_EncryptInit()");
+	assert(len <= sizeof(ap->ap_key));
+
+	memcpy(ap->ap_key, key, len);
+	ap->ap_key_len = len;
 
 	return 0;
 }
@@ -169,21 +172,103 @@ static void aes_destroy(struct crypt *c)
 	free(c);
 }
 
-struct crypt *crypt_AES_new(void)
+static int aes_aead_encrypt(struct crypt *c, void *iv, void *aad, int aadlen,
+			    void *data, int dlen, void *tag)
+{
+	struct aes_priv *p = crypt_priv(c);
+	int len = aadlen;
+
+	if (EVP_EncryptInit_ex(&p->ap_ctx, NULL, NULL, p->ap_key, iv) != 1)
+		errx(1, "EVP_EncryptInit_ex()");
+
+	if (EVP_EncryptUpdate(&p->ap_ctx, NULL, &len, aad, aadlen) != 1)
+		errx(1, "EVP_EncryptUpdate()");
+
+	assert(len == aadlen);
+
+	len = dlen;
+
+	if (EVP_EncryptUpdate(&p->ap_ctx, data, &len, data, dlen) != 1)
+		errx(1, "EVP_EncryptUpdate()");
+
+	assert(len == dlen);
+
+	len = 0;
+	if (EVP_EncryptFinal_ex(&p->ap_ctx, data + dlen, &len) != 1)
+		errx(1, "EVP_EncryptFinal_ex()");
+
+	assert(len == 0);
+
+	if (EVP_CIPHER_CTX_ctrl(&p->ap_ctx, EVP_CTRL_GCM_GET_TAG, 16, tag) != 1)
+		errx(1, "EVP_CTRL_GCM_GET_TAG");
+
+	return dlen;
+}
+
+static int aes_aead_decrypt(struct crypt *c, void *iv, void *aad, int aadlen,
+			    void *data, int dlen, void *tag)
+{
+	struct aes_priv *p = crypt_priv(c);
+	int len = aadlen;
+
+	if (EVP_DecryptInit_ex(&p->ap_ctx, NULL, NULL, p->ap_key, iv) != 1)
+		errx(1, "EVP_EncryptInit_ex()");
+
+	if (EVP_DecryptUpdate(&p->ap_ctx, NULL, &len, aad, aadlen) != 1)
+		errx(1, "EVP_EncryptUpdate()");
+
+	assert(len == aadlen);
+
+	len = dlen;
+
+	if (EVP_DecryptUpdate(&p->ap_ctx, data, &len, data, dlen) != 1)
+		errx(1, "EVP_EncryptUpdate()");
+
+	assert(len == dlen);
+
+	if (EVP_CIPHER_CTX_ctrl(&p->ap_ctx, EVP_CTRL_GCM_SET_TAG, 16, tag) != 1)
+		errx(1, "EVP_CTRL_GCM_GET_TAG");
+
+	len = 0;
+	if (EVP_DecryptFinal_ex(&p->ap_ctx, data + dlen, &len) <= 0)
+		return -1;
+
+	return dlen;
+}
+
+static struct crypt *crypt_AES_new(const EVP_CIPHER *evp)
 {
         struct aes_priv *p;
         struct crypt *c;
 
         c = crypt_init(sizeof(*p));
-        c->c_destroy = aes_destroy;
-	c->c_set_key = aes_set_key;
-	c->c_mac     = aes_ack_mac;
-	c->c_encrypt = aes_encrypt;
-	c->c_decrypt = aes_decrypt;
+        c->c_destroy      = aes_destroy;
+	c->c_set_key      = aes_set_key;
+	c->c_mac          = aes_ack_mac;
+	c->c_encrypt      = aes_encrypt;
+	c->c_decrypt      = aes_decrypt;
+	c->c_aead_encrypt = aes_aead_encrypt;
+	c->c_aead_decrypt = aes_aead_decrypt;
 
         p = crypt_priv(c);
 
-	EVP_CIPHER_CTX_init(&p->ap_ctx);
+	if (EVP_EncryptInit_ex(&p->ap_ctx, evp, NULL, NULL, NULL) != 1)
+		errx(1, "EVP_EncryptInit_ex()");
+
+	if (EVP_CIPHER_CTX_ctrl(&p->ap_ctx, EVP_CTRL_GCM_SET_IVLEN, 8, NULL)
+	    != 1) {
+		errx(1, "EVP_CTRL_GCM_SET_IVLEN");
+	}
 
         return c;
+}
+
+struct crypt *crypt_AES128_new(void)
+{
+	return crypt_AES_new(EVP_aes_128_gcm());
+}
+
+struct crypt *crypt_AES256_new(void)
+{
+	return crypt_AES_new(EVP_aes_256_gcm());
 }

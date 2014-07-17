@@ -16,7 +16,8 @@ enum {
 };
 
 enum {
-	TC_AES128_HMAC_SHA2 = 0x01,
+	TC_AES128_GCM = 0x01,
+	TC_AES256_GCM = 0x02,
 };
 
 enum {
@@ -146,9 +147,6 @@ enum {
 
 struct tc_keys {
 	struct stuff	tk_prk;
-	struct stuff	tk_enc;
-	struct stuff	tk_mac;
-	struct stuff	tk_ack;
 };
 
 struct tc_keyset {

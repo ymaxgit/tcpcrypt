@@ -32,12 +32,17 @@ struct crypt {
 			    void *out, int outlen);
 	int     (*c_encrypt)(struct crypt *c, void *iv, void *data, int len);
 	int	(*c_decrypt)(struct crypt *c, void *iv, void *data, int len);
+	int	(*c_aead_encrypt)(struct crypt *c, void *iv, void *aad,
+				  int aadlen, void *data, int dlen, void *tag);
+	int	(*c_aead_decrypt)(struct crypt *c, void *iv, void *aad,
+				  int aadlen, void *data, int dlen, void *tag);
 	int	(*c_compute_key)(struct crypt *c, void *out);
 };
 
 extern struct crypt *crypt_HMAC_SHA256_new(void);
 extern struct crypt *crypt_HKDF_SHA256_new(void);
-extern struct crypt *crypt_AES_new(void);
+extern struct crypt *crypt_AES128_new(void);
+extern struct crypt *crypt_AES256_new(void);
 extern struct crypt *crypt_RSA_new(void);
 extern struct crypt *crypt_ECDHE256_new(void);
 extern struct crypt *crypt_ECDHE521_new(void);
@@ -138,6 +143,7 @@ struct crypt_sym {
 	struct crypt	*cs_mac;
 	struct crypt	*cs_ack_mac;
 	int		cs_mac_len;
+	int		cs_key_len;
 	int		cs_iv_len;
 };
 

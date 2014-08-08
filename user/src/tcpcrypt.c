@@ -3438,8 +3438,38 @@ static void init_ciphers(void)
                        (uint8_t*) _sym + sizeof(_sym));
 }
 
+static void init_random(void)
+{
+	unsigned int seed = 0;
+	char *path;
+	FILE *f;
+
+	path = "/dev/urandom";
+	f = fopen(path, "r");
+	if (!f) {
+		path = "/dev/random";
+		f = fopen(path, "r");
+	}
+	if (f) {
+		size_t nread = fread((void*) &seed, sizeof(seed), 1, f);
+		if (nread != 1) {
+			errx(1, "Could not read random seed from %s", path);
+		}
+	}
+	else {
+		err(1, "Could not find a random device");
+	}
+
+	if (seed) {
+		srand(seed);
+		xprintf(XP_DEBUG, "Random seed set to %u\n", seed);
+	} else {
+		errx(1, "Could not provide random seed");
+	}
+}
+
 void tcpcrypt_init(void)
 {
-	srand(time(NULL)); /* XXX */
+	init_random();
 	init_ciphers();
 }

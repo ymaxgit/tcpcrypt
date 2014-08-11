@@ -3444,20 +3444,26 @@ static void init_random(void)
 	char *path;
 	FILE *f;
 
-	path = "/dev/urandom";
-	f = fopen(path, "r");
-	if (!f) {
-		path = "/dev/random";
-		f = fopen(path, "r");
+	path = _conf.cf_random_path;
+	if (path) {
+		if (!(f = fopen(path, "r"))) {
+			err(1, "Could not open random device %s", path);
+		}
+	}
+	else {
+		path = "/dev/urandom";
+		if (!(f = fopen(path, "r"))) {
+			path = "/dev/random";
+			if (!(f = fopen(path, "r"))) {
+				errx(1, "Could not find a random device");
+			}
+		}
 	}
 	if (f) {
 		size_t nread = fread((void*) &seed, sizeof(seed), 1, f);
 		if (nread != 1) {
 			errx(1, "Could not read random seed from %s", path);
 		}
-	}
-	else {
-		err(1, "Could not find a random device");
 	}
 
 	if (seed) {

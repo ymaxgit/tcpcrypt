@@ -1034,11 +1034,15 @@ int main(int argc, char *argv[])
 	_conf.cf_test 	     = -1;
 	_conf.cf_test_server = "check.tcpcrypt.org";
 
-	while ((ch = getopt(argc, argv, "hp:vdu:camnPt:T:S:Dx:NC:M:Rifs:V"))
+	while ((ch = getopt(argc, argv, "hp:vdu:camnPt:T:S:Dx:NC:M:r:Rifs:V"))
 	       != -1) {
 		switch (ch) {
 		case 'i':
 			_conf.cf_disable_timers = 1;
+			break;
+
+		case 'r':
+			_conf.cf_random_path = optarg;
 			break;
 
 		case 'R':
@@ -1126,9 +1130,13 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'h':
-		default:
 			usage(argv[0]);
 			exit(0);
+			break;
+
+		default:
+			usage(argv[0]);
+			exit(1);
 			break;
 		}
 	}

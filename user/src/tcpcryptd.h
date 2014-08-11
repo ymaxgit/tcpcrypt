@@ -57,6 +57,7 @@ struct conf {
 	int		cf_disable_timers;
 	int		cf_disable_network_test;
 	char		*cf_test_server;
+	char		*cf_random_path;
 };
 
 extern struct conf _conf;

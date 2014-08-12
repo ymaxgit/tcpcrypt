@@ -1007,6 +1007,7 @@ static void usage(char *prog)
 	       "-N\trun as nat / middlebox\n"
 	       "-C\t<preferred cipher>\n"
 	       "-M\t<preferred MAC>\n"
+	       "-r\t<random device>\n"
 	       "-R\tRSA client hack\n"
 	       "-i\tdisable timers\n"
 	       "-f\tdisable network test\n"

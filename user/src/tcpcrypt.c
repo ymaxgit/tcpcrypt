@@ -3443,6 +3443,7 @@ static void init_random(void)
 	unsigned int seed = 0;
 	char *path;
 	FILE *f;
+	size_t nread;
 
 	path = _conf.cf_random_path;
 	if (path) {
@@ -3460,10 +3461,12 @@ static void init_random(void)
 		}
 	}
 	if (f) {
-		size_t nread = fread((void*) &seed, sizeof(seed), 1, f);
+		xprintf(XP_ALWAYS, "Reading random seed from %s ", path);
+		nread = fread((void*) &seed, sizeof(seed), 1, f);
 		if (nread != 1) {
 			errx(1, "Could not read random seed from %s", path);
 		}
+		xprintf(XP_ALWAYS, "\n");
 	}
 
 	if (seed) {

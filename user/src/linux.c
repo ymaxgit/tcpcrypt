@@ -179,7 +179,7 @@ void divert_next_packet(int s)
 	nfq_handle_packet(_h, buf, rc);
 }
 
-void linux_drop_privs(void)
+void linux_drop_privs(uid_t uid)
 {
 	cap_t caps = cap_init();
 	int num = 2;
@@ -198,8 +198,8 @@ void linux_drop_privs(void)
 
 	cap_free(caps);
 
-	if (setuid(666) == -1)
-		err(1, "setuid()");
+	if (setuid(uid) < 0)
+		err(1, "setuid(%ld)", (long) uid);
 
 	caps = cap_init();
 	num  = 1;

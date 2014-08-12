@@ -7,11 +7,32 @@ PORT2=${2:-7777}
 TCPCRYPTD=`dirname $0`/src/tcpcryptd
 DIVERT_PORT=666
 PIDFILE=/var/run/tcpcrypt.pid
+JAIL_DIR=/var/run/tcpcryptd
+JAIL_USER=tcpcryptd
 
 start_tcpcryptd() {
-    LD_LIBRARY_PATH=lib/ $TCPCRYPTD $OPTS -p $DIVERT_PORT &
+    LD_LIBRARY_PATH=lib/ $TCPCRYPTD \
+        -U $JAIL_USER \
+        -J $JAIL_DIR \
+        -p $DIVERT_PORT \
+        $OPTS &
     echo $! > $PIDFILE
     wait $!
+}
+
+init_jail() {
+    if [ ! -d "$JAIL_DIR" ]
+    then
+        echo "Creating jail directory $JAIL_DIR"
+        (umask 022 && mkdir $JAIL_DIR)
+    fi
+
+    id $JAIL_USER >/dev/null 2>&1
+    if [ $? -ne 0 ]
+    then
+        echo "Creating user and group '$JAIL_USER'"
+        useradd -s /nonexistent -d /nonexistent -M -U $JAIL_USER
+    fi
 }
 
 ee() {
@@ -57,7 +78,7 @@ bsd_unset_ipfw() {
 win_start_tcpcryptd() {
     MAC_ADDR=`ipconfig /all | grep 'Physical Address'| head -n 1 | sed 's/\s*Physical Address\(\. \)*: \(.*\)/\2/' | sed 's/-/:/g'`
     echo Using MAC address $MAC_ADDR...
-    LD_LIBRARY_PATH=lib/ $TCPCRYPTD $OPTS -p $DIVERT_PORT -x $MAC_ADDR &
+    LD_LIBRARY_PATH=lib/ $TCPCRYPTD $OPTS -I -p $DIVERT_PORT -x $MAC_ADDR &
     echo $! > $PIDFILE
     wait $!    
 }
@@ -100,6 +121,7 @@ case "$OSNAME" in
     Linux)
         check_existing_tcpcryptd
         check_root
+        init_jail
         linux_set_iptables
         trap linux_unset_iptables 2 # trap SIGINT to remove iptables rules before exit
         start_tcpcryptd
@@ -108,6 +130,7 @@ case "$OSNAME" in
     FreeBSD|Darwin)
         check_existing_tcpcryptd
         check_root
+        init_jail
         bsd_set_ipfw
         trap bsd_unset_ipfw 2
         start_tcpcryptd

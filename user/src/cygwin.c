@@ -156,6 +156,7 @@ void divert_cycle(void)
 	_outbound.p_next = NULL;
 }
 
-void drop_privs(void)
+void drop_privs(const char *dir, const char *name)
 {
+		xprintf(XP_ALWAYS, "WARNING: Cannot drop privileges!");
 }

@@ -17,6 +17,8 @@
 #define __FAVOR_BSD
 #include <netinet/tcp.h>
 #include <errno.h>
+#include <pwd.h>
+#include <grp.h>
 #include <openssl/err.h>
 
 #include "tcpcrypt_divert.h"
@@ -79,20 +81,52 @@ void divert_cycle(void)
 {
 }
 
-void drop_privs(void)
+void drop_privs(const char *dir, const char *name)
 {
-#ifdef __linux__
-	if (chroot("/tmp") == -1)
-		err(1, "chroot()");
-#endif
+	struct passwd *pwd = NULL;
+	uid_t uid = (uid_t)(-1);
+	gid_t gid;
 
-	if (setgid(666) == -1)
-		err(1, "setgid()");
+	if (name) {
+		errno = 0;
+		pwd = getpwnam(name);
+		if (pwd == NULL)
+			(errno ? err : errx)(1, "Can't find user '%s'", name);
+		uid = pwd->pw_uid;
+		gid = pwd->pw_gid;
 
+		if (setgid(gid) < 0)
+			err(1, "setgid(%ld)", (long) gid);
+
+		if (initgroups(name, gid) < 0)
+			err(1, "initgroups(\"%s\", %ld)",
+			    name, (long) gid);
+	}
+
+	if (dir) {
+		if (chroot(dir) < 0)
+			err(1, "Could not chroot to %s", dir);
+		if (chdir("/") < 0)
+			err(1, "Could not chdir to root of jail");
+	}
+
+	if (name) {
 #if defined(__linux__)
-	linux_drop_privs();
+		linux_drop_privs(uid);
 #else
-	if (setuid(666) == -1)
-		err(1, "setuid()");
+		if (setuid(uid) != 0)
+			err(1, "setuid(%ld)", (long) uid);
 #endif
+	}
+
+	if (dir)
+		xprintf(XP_DEFAULT, "Changed filesystem root to %s\n", dir);
+	else
+		xprintf(XP_ALWAYS, "WARNING: Did not chroot()\n");
+
+	if (name)
+		xprintf(XP_DEFAULT, "Changed to user '%s' (%ld)\n",
+			name, (long) uid);
+	else
+		xprintf(XP_ALWAYS, "WARNING: Retaining root privileges!\n");
 }

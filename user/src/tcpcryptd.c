@@ -853,7 +853,7 @@ void tcpcryptd(void)
 
 	open_unix();
 
-	drop_privs();
+	drop_privs(_conf.cf_jaildir, _conf.cf_jailuser);
 
 	printf("Running\n");
 
@@ -1012,6 +1012,9 @@ static void usage(char *prog)
 	       "-f\tdisable network test\n"
 	       "-s\t<network test server>\n"
 	       "-V\tshow version\n"
+	       "-U\t<jail user name>\n"
+	       "-J\t<jail directory>\n"
+	       "-I\tforce running without -U or -J\n"
 	       , prog);
 
 	printf("\nTests:\n");
@@ -1034,7 +1037,7 @@ int main(int argc, char *argv[])
 	_conf.cf_test 	     = -1;
 	_conf.cf_test_server = "check.tcpcrypt.org";
 
-	while ((ch = getopt(argc, argv, "hp:vdu:camnPt:T:S:Dx:NC:M:r:Rifs:V"))
+	while ((ch = getopt(argc, argv, "hp:vdu:camnPt:T:S:Dx:NC:M:r:Rifs:VU:J:I"))
 	       != -1) {
 		switch (ch) {
 		case 'i':
@@ -1129,6 +1132,18 @@ int main(int argc, char *argv[])
 			_conf.cf_test_server = optarg;
 			break;
 
+		case 'U':
+			_conf.cf_jailuser = optarg;
+			break;
+
+		case 'J':
+			_conf.cf_jaildir = optarg;
+			break;
+
+		case 'I':
+			_conf.cf_force_insecure = 1;
+			break;
+
 		case 'h':
 			usage(argv[0]);
 			exit(0);
@@ -1139,6 +1154,12 @@ int main(int argc, char *argv[])
 			exit(1);
 			break;
 		}
+	}
+
+	if (!((_conf.cf_jailuser && _conf.cf_jaildir)
+		|| _conf.cf_force_insecure)) {
+		errx(1, "Jail user or directory unspecified; "
+			"use -I to force insecure operation");
 	}
 
 	resolve_server();

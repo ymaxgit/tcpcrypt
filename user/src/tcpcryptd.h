@@ -58,6 +58,9 @@ struct conf {
 	int		cf_disable_network_test;
 	char		*cf_test_server;
 	char		*cf_random_path;
+	char		*cf_jaildir;
+	char		*cf_jailuser;
+	int		cf_force_insecure;
 };
 
 extern struct conf _conf;
@@ -76,8 +79,8 @@ extern void tcpcryptd(void);
 extern void set_packet_hook(int post, packet_hook hook);
 extern char *driver_param(int x);
 extern char *test_param(int x);
-extern void drop_privs(void);
-extern void linux_drop_privs(void);
+extern void drop_privs(const char *dir, const char *name);
+extern void linux_drop_privs(uid_t uid);
 
 extern uint64_t xbe64toh(uint64_t x);
 extern uint64_t xhtobe64(uint64_t x);

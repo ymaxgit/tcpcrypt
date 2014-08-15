@@ -17,6 +17,7 @@ Installing tcpcrypt
 
     git clone git://github.com/sorbo/tcpcrypt.git
     cd tcpcrypt/user
+    ./bootstrap.sh
     ./configure
     make
     sudo ./launch_tcpcryptd.sh

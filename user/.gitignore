@@ -17,3 +17,8 @@ stamp-h1
 libtool
 autoscan.log
 configure.scan
+Makefile.in
+m4/*
+config/*
+config.h.in
+configure

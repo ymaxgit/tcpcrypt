@@ -37,7 +37,7 @@ struct params {
 };
 
 struct conf {
-	int		cf_port;
+	int		cf_divert;
 	int		cf_verbose;
 	int		cf_disable;
 	int		cf_ctl;
@@ -56,11 +56,10 @@ struct conf {
 	int		cf_rsa_client_hack;
 	int		cf_disable_timers;
 	int		cf_disable_network_test;
-	char		*cf_test_server;
-	char		*cf_random_path;
-	char		*cf_jaildir;
-	char		*cf_jailuser;
-	int		cf_force_insecure;
+	const char	*cf_test_server;
+	const char	*cf_random_path;
+	const char	*cf_jail_dir;
+	const char	*cf_jail_user;
 };
 
 extern struct conf _conf;

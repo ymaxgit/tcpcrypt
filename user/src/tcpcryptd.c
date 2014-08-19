@@ -23,6 +23,7 @@
 #include "test.h"
 #include "crypto.h"
 #include "tcpcrypt_strings.h"
+#include "config.h"
 
 #define ARRAY_SIZE(n)	(sizeof(n) / sizeof(*n))
 #define MAX_TIMERS 1024
@@ -359,7 +360,7 @@ static void handle_ctl(int ctl)
 		backlog_ctl(c, &s_un);
 }
 
-static void open_unix(void)
+static void bind_control_socket(void)
 {
 	struct sockaddr_in s_un;
 
@@ -849,11 +850,11 @@ static void do_test(void)
 
 void tcpcryptd(void)
 {
-	_state.s_divert = divert_open(_conf.cf_port, packet_handler);
+	_state.s_divert = divert_open(_conf.cf_divert, packet_handler);
 
-	open_unix();
+	bind_control_socket();
 
-	drop_privs(_conf.cf_jaildir, _conf.cf_jailuser);
+	drop_privs(_conf.cf_jail_dir, _conf.cf_jail_user);
 
 	printf("Running\n");
 
@@ -990,13 +991,13 @@ static void usage(char *prog)
 
 	printf("Usage: %s <opt>\n"
 	       "-h\thelp\n"
-	       "-p\t<divert port>\n"
+	       "-p\t<divert port> (default: %d)\n"
 	       "-v\tverbose\n"
 	       "-d\tdisable\n"
 	       "-c\tno cache\n"
 	       "-a\tdivert accept (NOP)\n"
 	       "-m\tdivert modify (NOP)\n"
-	       "-u\t<ctl socket port>\n"
+	       "-u\t<local control port> (default: %d)\n"
 	       "-n\tno crypto\n"
 	       "-P\tprofile\n"
 	       "-S\tprofile time source (0 TSC, 1 gettimeofday)\n"
@@ -1011,12 +1012,11 @@ static void usage(char *prog)
 	       "-R\tRSA client hack\n"
 	       "-i\tdisable timers\n"
 	       "-f\tdisable network test\n"
-	       "-s\t<network test server>\n"
+	       "-s\t<network test server> (default: " TCPCRYPTD_TEST_SERVER ")\n"
 	       "-V\tshow version\n"
-	       "-U\t<jail user name>\n"
-	       "-J\t<jail directory>\n"
-	       "-I\tforce running without -U or -J\n"
-	       , prog);
+	       "-U\t<jail username> (default: " TCPCRYPTD_JAIL_USER ")\n"
+	       "-J\t<jail directory> (default: " TCPCRYPTD_JAIL_DIR ")\n"
+	       , prog, TCPCRYPTD_DIVERT_PORT, TCPCRYPTD_CONTROL_PORT);
 
 	printf("\nTests:\n");
 	for (i = 0; i < sizeof(_tests) / sizeof(*_tests); i++)
@@ -1033,12 +1033,14 @@ int main(int argc, char *argv[])
 		errx(1, "WSAStartup()");
 #endif
 
-	_conf.cf_port 	     = 666;
-	_conf.cf_ctl  	     = TCPCRYPT_CTLPATH;
+	_conf.cf_divert	     = TCPCRYPTD_DIVERT_PORT;
+	_conf.cf_ctl  	     = TCPCRYPTD_CONTROL_PORT;
 	_conf.cf_test 	     = -1;
-	_conf.cf_test_server = "check.tcpcrypt.org";
+	_conf.cf_test_server = TCPCRYPTD_TEST_SERVER;
+	_conf.cf_jail_dir    = TCPCRYPTD_JAIL_DIR;
+	_conf.cf_jail_user   = TCPCRYPTD_JAIL_USER;
 
-	while ((ch = getopt(argc, argv, "hp:vdu:camnPt:T:S:Dx:NC:M:r:Rifs:VU:J:I"))
+	while ((ch = getopt(argc, argv, "hp:vdu:camnPt:T:S:Dx:NC:M:r:Rifs:VU:J:"))
 	       != -1) {
 		switch (ch) {
 		case 'i':
@@ -1114,7 +1116,7 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'p':
-			_conf.cf_port = atoi(optarg);
+			_conf.cf_divert = atoi(optarg);
 			break;
 
 		case 'v':
@@ -1134,15 +1136,11 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'U':
-			_conf.cf_jailuser = optarg;
+			_conf.cf_jail_user = optarg;
 			break;
 
 		case 'J':
-			_conf.cf_jaildir = optarg;
-			break;
-
-		case 'I':
-			_conf.cf_force_insecure = 1;
+			_conf.cf_jail_dir = optarg;
 			break;
 
 		case 'h':
@@ -1155,12 +1153,6 @@ int main(int argc, char *argv[])
 			exit(1);
 			break;
 		}
-	}
-
-	if (!((_conf.cf_jailuser && _conf.cf_jaildir)
-		|| _conf.cf_force_insecure)) {
-		errx(1, "Jail user or directory unspecified; "
-			"use -I to force insecure operation");
 	}
 
 	resolve_server();

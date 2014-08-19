@@ -10,6 +10,7 @@
 
 #include <tcpcrypt/tcpcrypt.h>
 #include "src/tcpcrypt_ctl.h"
+#include "config.h"
 
 #define MAX_LEN	1200
 
@@ -26,7 +27,7 @@ enum {
 };
 
 struct conf {
-	int			cf_path;
+	int			cf_port;
 	int			cf_s;
 	uint32_t		cf_seq;
 	struct sockaddr_in	cf_sun;
@@ -34,7 +35,7 @@ struct conf {
 };
 
 static struct conf _conf = {
-	.cf_path = TCPCRYPT_CTLPATH,
+	.cf_port = TCPCRYPTD_CONTROL_PORT,
 };
 
 union sockaddr_u {
@@ -51,14 +52,14 @@ static void set_addr()
 
 	addr->sin_family      = PF_INET;
 	addr->sin_addr.s_addr = inet_addr("127.0.0.1");
-	addr->sin_port	      = htons(_conf.cf_path);
+	addr->sin_port	      = htons(_conf.cf_port);
 }
 
 void tcpcrypt_setparam(int param, void *val)
 {
 	switch (param) {
 	case TCPCRYPT_PARAM_CTLPATH:
-		_conf.cf_path = atoi(val);
+		_conf.cf_port = atoi(val);
 		set_addr();
 		break;
 

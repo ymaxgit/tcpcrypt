@@ -3441,7 +3441,7 @@ static void init_ciphers(void)
 static void init_random(void)
 {
 	unsigned int seed = 0;
-	char *path;
+	const char *path;
 	FILE *f;
 	size_t nread;
 

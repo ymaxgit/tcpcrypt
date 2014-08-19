@@ -15,7 +15,7 @@ For more information, see [tcpcrypt.org](http://tcpcrypt.org).
 Installing tcpcrypt
 -------------------
 
-    git clone git://github.com/sorbo/tcpcrypt.git
+    git clone git://github.com/scslab/tcpcrypt.git
     cd tcpcrypt/user
     ./bootstrap.sh
     ./configure
@@ -73,14 +73,13 @@ If it's not working, the most likely causes are the following.
    * There's a conflict with your existing firewall rules. See the
      firewall setup section in the install guide for your platform.
 
-Visit [http://wiki.github.com/sorbo/tcpcrypt/troubleshooting](http://wiki.github.com/sorbo/tcpcrypt/troubleshooting) if you're still
+Visit [http://wiki.github.com/scslab/tcpcrypt/troubleshooting](http://wiki.github.com/scslab/tcpcrypt/troubleshooting) if you're still
 unable to make it work.
 
-To build the `test_tcpcrypt` utility, run `make check` from `user/`. Run `test_tcpcrypt -v` to see the various tests that it can run.
 
 More info
 ---------
 
 The `INSTALL-*` files have more detailed installation and firewall setup instructions. See [tcpcrypt.org](http://tcpcrypt.org) for general info, including the [protocol specification](http://tcpcrypt.org/docs.php) and the [tcpcrypt paper, "The case for ubiquitous transport-level encryption"](http://tcpcrypt.org/tcpcrypt.pdf), presented at USENIX Security 2010.
 
-The code repository lives at [http://github.com/sorbo/tcpcrypt](http://github.com/sorbo/tcpcrypt).
+The code repository lives at [http://github.com/scslab/tcpcrypt](http://github.com/scslab/tcpcrypt).

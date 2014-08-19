@@ -14,6 +14,7 @@ Compiling
 Tcpcrypt does not depend on non-standard libs on Mac OS X, so just run:
 
     cd tcpcrypt/user
+    ./bootstrap.sh
     ./configure
     make
 

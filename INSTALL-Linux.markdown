@@ -45,6 +45,7 @@ Compiling
 Run:
 
     cd tcpcrypt/user
+    ./bootstrap.sh
     ./configure
     make
 

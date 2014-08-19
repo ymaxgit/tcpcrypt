@@ -20,6 +20,7 @@ Compiling
 ---------
 
     cd tcpcrypt/user
+    ./bootstrap.sh
     ./configure
     make
 

@@ -66,7 +66,6 @@ AC_CHECK_LIB([netfilter_queue], [nfq_open])
 AC_CHECK_LIB([nfnetlink], [nfnl_rcvbufsiz])
 AC_CHECK_LIB([pthread], [pthread_create])
 AC_CHECK_LIB([rt], [clock_gettime])
-AC_CHECK_LIB([ssl], [EC_POINT_new])
 AC_CHECK_LIB([z], [compress])
 AC_CHECK_LIB([wsock32], [bind]) # TODO: find symbol name
 AC_CHECK_LIB([iphlpapi], [GetAdaptersInfo]) # TODO: find symbol name
@@ -94,6 +93,5 @@ AC_CHECK_FUNCS([bzero clock_gettime gettimeofday inet_ntoa memmove memset select
 AC_CONFIG_FILES([Makefile
                  lib/Makefile
                  src/Makefile
-                 test/Makefile
                  util/Makefile])
 AC_OUTPUT

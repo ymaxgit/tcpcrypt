@@ -257,7 +257,7 @@ static int setsockopt_kernel(int s, int level, int optname, const void *optval,
 	if ((optlen + 4) > sizeof(lame))
 		return -1;
 
-	*((int*) lame) = optname;
+	memcpy(lame, &optname, sizeof(int));
 
 	memcpy(&lame[sizeof(int)], optval, optlen);
 
@@ -275,7 +275,7 @@ static int getsockopt_kernel(int s, int level, int optname, void *optval,
 	if (*optlen > sizeof(lame))
 		return -1;
 
-	*((int*) lame) = optname;
+	memcpy(lame, &optname, sizeof(int));
 
 	rc = getsockopt(s, SOL_TCP, TCP_CRYPT, lame, optlen);
 

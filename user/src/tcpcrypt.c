@@ -2441,10 +2441,6 @@ static int process_init2(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	int len;
 	int nlen;
 	void *nonce;
-	void *key;
-	int klen;
-	uint8_t kxs[1024];
-	int kxs_len;
 
 	tcs = find_subopt(tcp, TCOP_INIT2);
 	if (!tcs)
@@ -2469,22 +2465,13 @@ static int process_init2(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	if (!select_sym(tc, &i2->i2_scipher))
 		return bad_packet("init2: select_sym()");
 
-	if (nlen > sizeof(kxs))
-		return bad_packet("init2: big nonce kxs");
-
-	assert(len <= sizeof(tc->tc_init2));
-
+	if (len > sizeof(tc->tc_init2))
+		return bad_packet("init2: too long");
 	memcpy(tc->tc_init2, i2, len);
 	tc->tc_init2_len = len;
 
-	/* XXX fix crypto api to use to / from */
-	kxs_len = nlen;
-	memcpy(kxs, i2->i2_data, nlen);
-
 	nonce = i2->i2_data;
 	nlen  = crypt_decrypt(tc->tc_crypt_pub->cp_pub, NULL, nonce, nlen);
-
-	klen = crypt_get_key(tc->tc_crypt_pub->cp_pub, &key);
 
 	assert(nlen <= sizeof(tc->tc_pms));
 	memcpy(tc->tc_pms, nonce, nlen);

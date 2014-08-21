@@ -11,35 +11,35 @@ AM_INIT_AUTOMAKE([1.9 foreign])
 AM_MAINTAINER_MODE([disable])
 
 AC_ARG_VAR([DIVERT_PORT], [Default divert port for tcpcryptd])
-if test "x$DIVERT_PORT" != "x"; then
+if test -n "$DIVERT_PORT"; then
    AC_DEFINE_UNQUOTED([TCPCRYPTD_DIVERT_PORT], [$DIVERT_PORT], [Default divert port for tcpcryptd])
 else
-   AC_DEFINE([TCPCRYPTD_DIVERT_PORT], [666], [Default divert port for tcpcryptd])
+   AC_DEFINE([TCPCRYPTD_DIVERT_PORT], 666, [Default divert port for tcpcryptd])
 fi
 
 AC_ARG_VAR([CONTROL_PORT], [Default local control port for tcpcryptd])
-if test "x$CONTROL_PORT" != "x"; then
+if test -n "$CONTROL_PORT"; then
    AC_DEFINE_UNQUOTED([TCPCRYPTD_CONTROL_PORT], [$CONTROL_PORT], [Default local control port for tcpcryptd])
 else
-   AC_DEFINE([TCPCRYPTD_CONTROL_PORT], [666], [Default local control port for tcpcryptd])
+   AC_DEFINE([TCPCRYPTD_CONTROL_PORT], 666, [Default local control port for tcpcryptd])
 fi
 
 AC_ARG_VAR([JAIL_DIR], [Default jail directory for tcpcryptd])
-if test "x$JAIL_DIR" != "x"; then
+if test -n "$JAIL_DIR"; then
    AC_DEFINE_UNQUOTED([TCPCRYPTD_JAIL_DIR], ["$JAIL_DIR"], [Default jail directory for tcpcryptd])
 else
    AC_DEFINE([TCPCRYPTD_JAIL_DIR], ["/var/run/tcpcryptd"], [Default jail directory for tcpcryptd])
 fi
 
 AC_ARG_VAR([JAIL_USER], [Default jail username for tcpcryptd])
-if test "x$JAIL_USER" != "x"; then
+if test -n "$JAIL_USER"; then
    AC_DEFINE_UNQUOTED([TCPCRYPTD_JAIL_USER], ["$JAIL_USER"], [Default jail username for tcpcryptd])
 else
    AC_DEFINE([TCPCRYPTD_JAIL_USER], ["tcpcryptd"], [Default jail username for tcpcryptd])
 fi
 
 AC_ARG_VAR([TEST_SERVER], [Default network test server for tcpcryptd])
-if test "x$TEST_SERVER" != "x"; then
+if test -n "$TEST_SERVER"; then
    AC_DEFINE_UNQUOTED([TCPCRYPTD_TEST_SERVER], ["$TEST_SERVER"], [Default network test server for tcpcryptd])
 else
    AC_DEFINE([TCPCRYPTD_TEST_SERVER], ["check.tcpcrypt.org"], [Default network test server for tcpcryptd])

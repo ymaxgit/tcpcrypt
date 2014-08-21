@@ -24,7 +24,7 @@ init_jail() {
     if [ ! -d "$JAIL_DIR" ]
     then
         echo "Creating jail directory $JAIL_DIR"
-        (umask 022 && mkdir $JAIL_DIR)
+        (umask 077 && mkdir $JAIL_DIR)
     fi
 
     id $JAIL_USER >/dev/null 2>&1

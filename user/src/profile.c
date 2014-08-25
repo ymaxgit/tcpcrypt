@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <inttypes.h>
 
 #include "profile.h"
 
@@ -164,7 +165,7 @@ static const char *sample_str(struct samples *s)
 		break;
 
 	case TIME_SOURCE_TSC:
-		sprintf(buf, "%llu", s->u.s_tsc);
+		sprintf(buf, "%" PRIu64, s->u.s_tsc);
 		break;
 
 	default:

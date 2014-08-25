@@ -7,7 +7,7 @@ AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_AUX_DIR(config)
 AC_CONFIG_MACRO_DIR([m4])
 
-AM_INIT_AUTOMAKE([1.9 foreign dist-xz])
+AM_INIT_AUTOMAKE([1.9 foreign dist-xz -Wall])
 AM_MAINTAINER_MODE([disable])
 
 AC_ARG_VAR([DIVERT_PORT], [Default divert port for tcpcryptd])
@@ -48,6 +48,7 @@ fi
 # Checks for programs.
 AC_PROG_CC
 AC_PROG_LN_S
+AM_PROG_AR
 AC_PROG_LIBTOOL
 AM_PROG_AS
 

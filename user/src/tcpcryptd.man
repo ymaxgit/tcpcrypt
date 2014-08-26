@@ -1,0 +1,16 @@
+.TH "tcpcryptd" "8" "" "" ""
+.SH NAME
+.PP
+tcpcryptd \- Implement the tcpcrypt protocol by transparently modifying
+network I/O
+.SH SYNOPSIS
+.PP
+tcpcryptd \f[I]options\f[]
+.SH OPTIONS
+.PP
+A summary of options is produced by:
+.PP
+tcpcryptd \-h
+.SH SEE ALSO
+.PP
+tcnetstat(8), http://tcpcrypt.org/

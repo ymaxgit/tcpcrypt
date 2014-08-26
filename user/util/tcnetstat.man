@@ -1,0 +1,11 @@
+.TH "tcnetstat" "8" "" "" ""
+.SH NAME
+.PP
+tcnetstat \- Print information about network connections protected by
+tcpcrypt
+.SH SYNOPSIS
+.PP
+tcnetstat
+.SH SEE ALSO
+.PP
+tcpcryptd(8), http://tcpcrypt.org/

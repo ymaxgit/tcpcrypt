@@ -32,3 +32,11 @@ if !NO_ASM
 tcpcryptd_SOURCES += checksum_32.S
 endif
 
+dist_man8_MANS = tcpcryptd.man
+
+if MAINTAINER_MODE
+tcpcryptd.man: tcpcryptd.man.md
+	pandoc -s -w man $^ -o $@
+endif
+
+EXTRA_DIST = tcpcryptd.man.md

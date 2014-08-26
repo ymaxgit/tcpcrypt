@@ -1,14 +1,27 @@
 #!/bin/sh
 
-OSNAME=`uname -s`
-PORT=${1:-80}
-PORT2=${2:-7777}
-
 TCPCRYPTD=`dirname $0`/src/tcpcryptd
 DIVERT_PORT=666
 PIDFILE=/var/run/tcpcrypt.pid
 JAIL_DIR=/var/run/tcpcryptd
 JAIL_USER=tcpcryptd
+
+OSNAME=`uname -s`
+
+if [ "$OSNAME" = "Linux" ]
+then
+    # set either ONLY_PORTS or OMIT_PORTS, in a manner acceptable to the
+    # "multiport" extension.  see iptables-extensions(8)
+
+    # ONLY_PORTS="80,7777"
+
+    # exclude already-encrypted services:
+    OMIT_PORTS="22,261,443,563,614,636,684,695,989,990,992:995"
+else
+    # for ipfw users:
+    PORT=${1:-80}
+    PORT2=${2:-7777}
+fi
 
 start_tcpcryptd() {
     LD_LIBRARY_PATH=lib/ $TCPCRYPTD \
@@ -40,24 +53,30 @@ ee() {
     eval $*
 }
 
-linux_set_iptables() {
-    echo Tcpcrypting port 80 and 7777...
-    ee iptables -I INPUT  -p tcp --sport $PORT -j NFQUEUE --queue-num $DIVERT_PORT
-    ee iptables -I OUTPUT -p tcp --dport $PORT -j NFQUEUE --queue-num $DIVERT_PORT
-    ee iptables -I INPUT  -p tcp --dport $PORT2 -j NFQUEUE --queue-num $DIVERT_PORT
-    ee iptables -I INPUT  -p tcp --sport $PORT2 -j NFQUEUE --queue-num $DIVERT_PORT
-    ee iptables -I OUTPUT -p tcp --dport $PORT2 -j NFQUEUE --queue-num $DIVERT_PORT
-    ee iptables -I OUTPUT -p tcp --sport $PORT2 -j NFQUEUE --queue-num $DIVERT_PORT
+set_iptables() {
+    if [ -n "$ONLY_PORTS" ]
+    then
+        IPT_PORTSPEC="-m multiport --ports $ONLY_PORTS"
+    elif [ -n "$OMIT_PORTS" ]
+    then
+        IPT_PORTSPEC="-m multiport \! --ports $OMIT_PORTS"
+    else
+        IPT_PORTSPEC=""
+    fi
+
+    IPT_INPUT="INPUT \! -i lo -p tcp $IPT_PORTSPEC -j NFQUEUE --queue-num $DIVERT_PORT"
+    IPT_OUTPUT="OUTPUT \! -o lo -p tcp $IPT_PORTSPEC -j NFQUEUE --queue-num $DIVERT_PORT"
+
+    ee iptables -I $IPT_INPUT
+    ee iptables -I $IPT_OUTPUT
 }
 
-linux_unset_iptables() {
+unset_iptables() {
     echo Removing iptables rules and quitting tcpcryptd...
-    iptables -D INPUT  -p tcp --sport $PORT -j NFQUEUE --queue-num $DIVERT_PORT
-    iptables -D OUTPUT -p tcp --dport $PORT -j NFQUEUE --queue-num $DIVERT_PORT
-    iptables -D INPUT  -p tcp --dport $PORT2 -j NFQUEUE --queue-num $DIVERT_PORT
-    iptables -D INPUT  -p tcp --sport $PORT2 -j NFQUEUE --queue-num $DIVERT_PORT
-    iptables -D OUTPUT -p tcp --dport $PORT2 -j NFQUEUE --queue-num $DIVERT_PORT
-    iptables -D OUTPUT -p tcp --sport $PORT2 -j NFQUEUE --queue-num $DIVERT_PORT
+
+    iptables -D $IPT_INPUT
+    iptables -D $IPT_OUTPUT
+
     exit
 }
 
@@ -122,10 +141,10 @@ case "$OSNAME" in
         check_existing_tcpcryptd
         check_root
         init_jail
-        linux_set_iptables
-        trap linux_unset_iptables 2 # trap SIGINT to remove iptables rules before exit
+        set_iptables
+        trap unset_iptables 2 # trap SIGINT to remove iptables rules before exit
         start_tcpcryptd
-        linux_unset_iptables
+        unset_iptables
         ;;
     FreeBSD|Darwin)
         check_existing_tcpcryptd

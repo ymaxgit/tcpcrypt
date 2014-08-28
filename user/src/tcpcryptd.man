@@ -15,33 +15,33 @@ A list of all options is produced by:
 .RE
 .SH DESCRIPTION
 .PP
-The \f[B]tcpcryptd\f[] daemon transforms TCP segments received from a
-kernel "divert" port (configurable with \f[B]\-p\f[] \f[I]port\f[]) in
-order to implement "opportunistic encryption" via the \f[I]tcpcrypt\f[]
-protocol: for peers that support the protocol (signalled by a TCP option
-in the SYN packet), ephemeral keys are exchanged and used to encrypt and
-protect the integrity of connection data.
-(The protocol provides integrity for parts of the TCP header as well.)
-When a peer does not signal support for \f[I]tcpcrypt\f[] in the
-connection handshake, the daemon will pass the remainder of the
-connection unperturbed (and thus unprotected).
+The \f[B]tcpcryptd\f[] daemon transforms TCP segments via a kernel
+"divert" port in order to implement "opportunistic encryption" according
+to the \f[I]tcpcrypt\f[] protocol.
+.PP
+For a peer that signals in the connection handshake that it has support
+for the \f[I]tcpcrypt\f[] protocol, ephemeral keys are exchanged and
+used to protect the confidentiality and integrity of the
+connection\[aq]s application data.
+(The protocol protects the integrity of parts of the TCP header as
+well.) When a peer does not indicate support for the protocol, the
+daemon will pass the remainder of the connection unperturbed (and thus
+unprotected).
 .PP
 Application software need not be modified to take advantage of this
 facility, which provides confidentiality in the face of passive network
 attackers (those who cannot modify network data in transit).
-But in order to protect communications from active attackers,
-connections must be authenticated as described below.
-.PP
-Configuration of packet diversion rules allows the system administrator
-to control which TCP connections are protected by \f[B]tcpcryptd\f[].
+But in order to protect communication from active attackers, the
+application must intentionally authenticate the connection as described
+below.
 .SS Authentication
 .PP
 The \f[I]tcpcrypt\f[] protocol does not itself protect communications
 against "active attackers", that is, those who are able to modify
 network packets in transit.
-Such an attacker may perform a "man in the middle" (MITM) attack that
-allows her to behave as the endpoint of the encrypted connection and
-thus compromise its intended confidentiality.
+Such an attacker may perform a "man in the middle" attack that allows
+her to behave as the endpoint of the encrypted connection and thus
+compromise its security.
 .PP
 However, applications aware of \f[I]tcpcrypt\f[] may authenticate the
 connection in whatever manner they choose, aided by an identifier for
@@ -51,15 +51,35 @@ the connection that is derived from the protocol and made available by
 A \f[I]session id\f[] is derived from the ephemeral keys used to encrypt
 each connection protected by \f[I]tcpcrypt\f[].
 This identifier is (probabalistically) unique over all connections, is
-not secret, and may be extracted by applications via a user library.
+not secret, and may be extracted by applications via the user library
+\f[B]libtcpcrypt\f[].
 Session ids for all active connections may also be listed with the
 netstat\-like utility \f[B]tcnetstat\f[](8).
 .PP
-Applications may use the \f[I]tcpcrypt\f[] session id to authenticate
-the connection in arbitrary ways.
-For example, they may bind it together with a shared secret such as a
-password, sign it with a public key, use a voice connection to speak a
-fingerprint of it, or simply record it for later confirmation.
+Connection peers may ensure they are communicating securely with each
+other (enjoying confidentiality and integrity in the face of active
+network attackers) by confirming that the \f[I]tcpcrypt\f[] session ids
+derived at each end are identical.
+For example, they may bind the session id together with a shared secret
+such as a password, sign it with public keys, use a voice connection to
+speak the fingerprint of it, or simply record it for later confirmation.
+.SH CONFIGURATION
+.PP
+Configuration of packet\-diversion rules allows the system administrator
+to control which TCP connections are protected by \f[B]tcpcryptd\f[].
+.PP
+The daemon communicates with the kernel via a "divert port",
+configurable with \f[B]\-p\f[] \f[I]port\f[].
+.PP
+The daemon communicates with user programs via a "control port",
+configurable with \f[B]\-u\f[] \f[I]localhost_port\f[].
+.PP
+Verbosity may be increased with multiple \f[B]\-v\f[] options.
+.PP
+A "phone\-home" test will be performed at daemon startup to confirm
+end\-to\-end functionality of the implementation (by default, with the
+authors\[aq] server), but may be redirected to another test\-server with
+\f[B]\-s\f[] \f[I]hostname\f[] or disabled completely with \f[B]\-f\f[].
 .SH SEE ALSO
 .PP
 \f[B]tcnetstat\f[](8), <http://tcpcrypt.org/>

@@ -68,9 +68,9 @@ Tcpcrypt is incompatible with ECN (explicit congestion notification, RFC 3168). 
 iptables firewall setup
 =======================
 
-The included `launch_tcpcryptd.sh` script adds iptable rules to divert Web and
-local port 7777 traffic to tcpcryptd. Read on only for more complex firewall
-setups.
+The included `launch_tcpcryptd.sh` script adds iptable rules to divert all TCP
+traffic -- *except* that which is already encrypted, like SSH -- to tcpcryptd.
+Read on only for more complex firewall setups.
 
 The naive way to use tcpcryptd:
 

@@ -22,10 +22,10 @@ Installing tcpcrypt
     make
     sudo ./launch_tcpcryptd.sh
 
-The launch script starts tcpcryptd and adds firewall rules to divert Web and
-local port 7777 (an arbitrarily chosen port number) traffic to tcpcryptd. When the script exits (on Ctrl-C or
-`kill`), it restores your firewall config to its former state--**no permanent
-changes are made**.
+The launch script starts tcpcryptd and adds firewall rules to divert all TCP
+traffic -- *except* that which is already encrypted, like SSH -- to tcpcryptd.
+When the script exits (on Ctrl-C or `kill`), it restores your firewall config
+to its former state -- *no permanent changes are made*.
 
 On Linux, you must first install libnfnetlink, libnetfilter_queue, and libcap.
 

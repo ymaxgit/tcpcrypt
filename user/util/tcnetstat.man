@@ -1,11 +1,15 @@
 .TH "tcnetstat" "8" "" "" ""
 .SH NAME
 .PP
-tcnetstat \- Print information about network connections protected by
-tcpcrypt
+\f[B]tcnetstat\f[] \- Print information about network connections
+protected by tcpcrypt
 .SH SYNOPSIS
 .PP
-tcnetstat
+\f[B]tcnetstat\f[]
+.SH DESCRIPTION
+.PP
+The \f[B]tcnetstat\f[] utility prints the \f[I]session id\f[] of each
+TCP connection that is currently being managed by \f[B]tcpcryptd\f[](8).
 .SH SEE ALSO
 .PP
-tcpcryptd(8), http://tcpcrypt.org/
+\f[B]tcpcryptd\f[](8), <http://tcpcrypt.org/>

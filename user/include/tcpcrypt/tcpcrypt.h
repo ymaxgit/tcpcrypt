@@ -8,6 +8,7 @@ extern "C" {
 
 #ifndef __WIN32__
 #include <sys/socket.h>
+#include <stdint.h>
 #else
 #include <winsock2.h>
 #include <ws2tcpip.h> /* TODO: needed? */

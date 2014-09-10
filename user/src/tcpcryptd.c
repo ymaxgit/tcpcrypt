@@ -22,6 +22,7 @@
 #include "profile.h"
 #include "test.h"
 #include "crypto.h"
+#include "shared/socket_address.h"
 #include "tcpcrypt_strings.h"
 #include "config.h"
 
@@ -32,7 +33,7 @@ struct conf _conf;
 
 struct backlog_ctl {
 	struct backlog_ctl	*bc_next;
-	struct sockaddr_in	bc_sun;
+	struct socket_address	bc_sa;
 	struct tcpcrypt_ctl	bc_ctl;
 };
 
@@ -264,14 +265,14 @@ void set_packet_hook(int post, packet_hook p)
 		_state.s_pre_packet_hook  = p;
 }
 
-static void backlog_ctl(struct tcpcrypt_ctl *c, struct sockaddr_in *s_un)
+static void backlog_ctl(struct tcpcrypt_ctl *c, struct socket_address *sa)
 {
 	struct backlog_ctl *b;
 
 	b = xmalloc(sizeof(*b) + c->tcc_dlen);
 	memset(b, 0, sizeof(*b));
 
-	memcpy(&b->bc_sun, s_un, sizeof(*s_un));
+	memcpy(&b->bc_sa, sa, sizeof(*sa));
 	memcpy(&b->bc_ctl, c, sizeof(*c));
 	memcpy(b->bc_ctl.tcc_data, c->tcc_data, c->tcc_dlen);
 
@@ -279,7 +280,7 @@ static void backlog_ctl(struct tcpcrypt_ctl *c, struct sockaddr_in *s_un)
 	_state.s_backlog_ctl.bc_next = b;
 }
 
-static int do_handle_ctl(struct tcpcrypt_ctl *c, struct sockaddr_in *s_un)
+static int do_handle_ctl(struct tcpcrypt_ctl *c, struct socket_address *sa)
 {
 	int l, rc;
 
@@ -299,8 +300,7 @@ static int do_handle_ctl(struct tcpcrypt_ctl *c, struct sockaddr_in *s_un)
 		return 0;
 
 	l = sizeof(*c) + c->tcc_dlen;
-	rc = sendto(_state.s_ctl, (void*) c, l, 0, (struct sockaddr*) s_un,
-		    sizeof(*s_un));
+	rc = sendto(_state.s_ctl, (void*) c, l, 0, &sa->addr.sa, sa->addr_len);
 
 	if (rc == -1)
 		err(1, "sendto()");
@@ -317,7 +317,7 @@ static void backlog_ctl_process(void)
 	struct backlog_ctl *b = prev->bc_next;
 
 	while (b) {
-		if (do_handle_ctl(&b->bc_ctl, &b->bc_sun)) {
+		if (do_handle_ctl(&b->bc_ctl, &b->bc_sa)) {
 			struct backlog_ctl *next = b->bc_next;
 
 			prev->bc_next = next;
@@ -335,11 +335,9 @@ static void handle_ctl(int ctl)
 	unsigned char buf[4096];
 	struct tcpcrypt_ctl *c = (struct tcpcrypt_ctl*) buf;
 	int rc;
-	struct sockaddr_in s_un;
-	socklen_t len = sizeof(s_un);
+	struct socket_address sa = SOCKET_ADDRESS_ANY;
 
-	rc = recvfrom(ctl, (void*) buf, sizeof(buf), 0,
-	 	      (struct sockaddr*) &s_un, &len);
+	rc = recvfrom(ctl, (void*) buf, sizeof(buf), 0, &sa.addr.sa, &sa.addr_len);
 	if (rc == -1)
 		err(1, "read(ctl)");
 
@@ -356,25 +354,8 @@ static void handle_ctl(int ctl)
 		return;
 	}
 
-	if (!do_handle_ctl(c, &s_un))
-		backlog_ctl(c, &s_un);
-}
-
-static void bind_control_socket(void)
-{
-	struct sockaddr_in s_un;
-
-	_state.s_ctl = socket(PF_INET, SOCK_DGRAM, 0);
-	if (_state.s_ctl == -1)
-		err(1, "socket(ctl)");
-
-	memset(&s_un, 0, sizeof(s_un));
-	s_un.sin_family      = PF_INET;
-	s_un.sin_addr.s_addr = inet_addr("127.0.0.1");
-	s_un.sin_port        = htons(_conf.cf_ctl);
-
-	if (bind(_state.s_ctl, (struct sockaddr*) &s_un, sizeof(s_un)) == -1)
-		err(1, "bind()");
+	if (!do_handle_ctl(c, &sa))
+		backlog_ctl(c, &sa);
 }
 
 static void dispatch_timers(void)
@@ -848,11 +829,45 @@ static void do_test(void)
 	printf("Test done\n");
 }
 
+int bind_control_socket(const char *descr)
+{
+	int r, s;
+	struct socket_address sa;
+	static const int error_len = 1000;
+	char error[error_len];
+
+	r = resolve_socket_address_local(_conf.cf_ctl, &sa, error, error_len);
+	if (r != 0)
+		errx(1, "interpreting socket address '%s': %s", descr, error);
+	{
+		char name[1000];
+		socket_address_pretty(name, 1000, &sa);
+		xprintf(XP_DEFAULT, "Opening control socket at %s\n", name);
+	}
+
+	if ((s = socket(sa.addr.sa.sa_family, SOCK_DGRAM, 0)) <= 0)
+		err(1, "socket()");
+
+	if (sa.addr.sa.sa_family == AF_UNIX
+	    && sa.addr_len > 0
+	    && sa.addr.un.sun_path[0] == '/')
+	{
+		if (unlink(sa.addr.un.sun_path)) {
+			if (errno != ENOENT)
+				err(1, "trying to unlink() previous control socket");
+		}
+	}
+	if (bind(s, &sa.addr.sa, sa.addr_len) != 0)
+		err(1, "bind()");
+
+	return s;
+}
+
 void tcpcryptd(void)
 {
 	_state.s_divert = divert_open(_conf.cf_divert, packet_handler);
 
-	bind_control_socket();
+	_state.s_ctl = bind_control_socket(_conf.cf_ctl);
 
 	drop_privs(_conf.cf_jail_dir, _conf.cf_jail_user);
 
@@ -997,7 +1012,7 @@ static void usage(char *prog)
 	       "-c\tno cache\n"
 	       "-a\tdivert accept (NOP)\n"
 	       "-m\tdivert modify (NOP)\n"
-	       "-u\t<local control port> (default: %d)\n"
+	       "-u\t<local control socket> (default: " TCPCRYPTD_CONTROL_SOCKET ")\n"
 	       "-n\tno crypto\n"
 	       "-P\tprofile\n"
 	       "-S\tprofile time source (0 TSC, 1 gettimeofday)\n"
@@ -1016,7 +1031,7 @@ static void usage(char *prog)
 	       "-V\tshow version\n"
 	       "-U\t<jail username> (default: " TCPCRYPTD_JAIL_USER ")\n"
 	       "-J\t<jail directory> (default: " TCPCRYPTD_JAIL_DIR ")\n"
-	       , prog, TCPCRYPTD_DIVERT_PORT, TCPCRYPTD_CONTROL_PORT);
+	       , prog, TCPCRYPTD_DIVERT_PORT);
 
 	printf("\nTests:\n");
 	for (i = 0; i < sizeof(_tests) / sizeof(*_tests); i++)
@@ -1034,7 +1049,7 @@ int main(int argc, char *argv[])
 #endif
 
 	_conf.cf_divert	     = TCPCRYPTD_DIVERT_PORT;
-	_conf.cf_ctl  	     = TCPCRYPTD_CONTROL_PORT;
+	_conf.cf_ctl  	     = TCPCRYPTD_CONTROL_SOCKET;
 	_conf.cf_test 	     = -1;
 	_conf.cf_test_server = TCPCRYPTD_TEST_SERVER;
 	_conf.cf_jail_dir    = TCPCRYPTD_JAIL_DIR;
@@ -1108,7 +1123,7 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'u':
-			_conf.cf_ctl = atoi(optarg);
+			_conf.cf_ctl = optarg;
 			break;
 
 		case 'd':

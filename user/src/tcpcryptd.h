@@ -40,7 +40,7 @@ struct conf {
 	int		cf_divert;
 	int		cf_verbose;
 	int		cf_disable;
-	int		cf_ctl;
+	const char	*cf_ctl;
 	int		cf_nocache;
 	int		cf_accept;
 	int		cf_modify;

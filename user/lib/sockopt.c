@@ -10,6 +10,7 @@
 
 #include <tcpcrypt/tcpcrypt.h>
 #include "src/tcpcrypt_ctl.h"
+#include "shared/socket_address.h"
 #include "config.h"
 
 #define MAX_LEN	1200
@@ -27,40 +28,54 @@ enum {
 };
 
 struct conf {
-	int			cf_port;
+	char			*cf_ctl;
 	int			cf_s;
 	uint32_t		cf_seq;
-	struct sockaddr_in	cf_sun;
+	struct socket_address	cf_sa;
 	int			cf_imp;
 };
 
-static struct conf _conf = {
-	.cf_port = TCPCRYPTD_CONTROL_PORT,
-};
-
 union sockaddr_u {
-  struct sockaddr addr;
-  struct sockaddr_in in;
-  struct sockaddr_in6 in6;
-  struct sockaddr_storage storage;
+	struct sockaddr addr;
+	struct sockaddr_in in;
+	struct sockaddr_in6 in6;
+	struct sockaddr_storage storage;
 };
 
-static void set_addr()
-{
-	struct sockaddr_in *addr = &_conf.cf_sun;
-	memset(addr, 0, sizeof(*addr));
+static struct conf _conf = {
+	.cf_s = -1,
+	.cf_ctl = TCPCRYPTD_CONTROL_SOCKET,
+	.cf_sa = SOCKET_ADDRESS_NULL
+};
 
-	addr->sin_family      = PF_INET;
-	addr->sin_addr.s_addr = inet_addr("127.0.0.1");
-	addr->sin_port	      = htons(_conf.cf_port);
+static void ensure_control_addr_resolved()
+{
+	struct socket_address sa;
+	int r;
+	static const int error_len = 1000;
+	char error[error_len];
+
+	if (!socket_address_is_null(&_conf.cf_sa))
+		return;
+
+	r = resolve_socket_address_local(_conf.cf_ctl, &sa, error, error_len);
+	if (r != 0)
+		errx(1, "opening control socket '%s': %s",
+			_conf.cf_ctl, error);
+
+	memcpy(&_conf.cf_sa, &sa, sizeof(sa));
 }
 
 void tcpcrypt_setparam(int param, void *val)
 {
 	switch (param) {
 	case TCPCRYPT_PARAM_CTLPATH:
-		_conf.cf_port = atoi(val);
-		set_addr();
+		_conf.cf_ctl = strdup(val);
+		socket_address_clear(&_conf.cf_sa);
+		if (_conf.cf_s >= 0) {
+			close(_conf.cf_s);
+			_conf.cf_s = -1;
+		}
 		break;
 
 	default:
@@ -69,16 +84,43 @@ void tcpcrypt_setparam(int param, void *val)
 	}
 }
 
-static void open_socket(void)
+static void bind_local_unix(int s)
 {
-	if (_conf.cf_s)
+	struct sockaddr_un sun;
+	socklen_t path_len;
+
+	memset(&sun, 0, sizeof(sun));
+	sun.sun_family = AF_UNIX;
+
+	if (OS_LINUX) {
+		/* request autobind to an abstract unix address */
+		path_len = 0;
+	} else {
+		/* this makes a mess, and breaks when pids get reused;
+		 * for now it is probably best to configure an AF_INET control
+		 * socket for non-linux systems
+		 */
+		path_len = snprintf(sun.sun_path, sizeof(sun.sun_path),
+				    "/tmp/libtcpcryptd-%d", getpid()) + 1;
+	}
+	if (bind(s, (struct sockaddr *) &sun, sizeof(sa_family_t) + path_len))
+		err(1, "local bind()");
+}
+
+static void ensure_control_socket_open(void)
+{
+	if (_conf.cf_s >= 0)
 		return;
 
-	_conf.cf_s = socket(PF_INET, SOCK_DGRAM, 0);
+	ensure_control_addr_resolved();
+
+	_conf.cf_s = socket(_conf.cf_sa.addr.sa.sa_family, SOCK_DGRAM, 0);
 	if (_conf.cf_s == -1)
 		err(1, "socket()");
 
-	set_addr();
+	if (_conf.cf_sa.addr.sa.sa_family == AF_UNIX) {
+		bind_local_unix(_conf.cf_s);
+	}
 }
 
 /* Sets fields in `struct tcpcrypt_ctl` given in the pointers `ctl_addr` and
@@ -194,10 +236,17 @@ static int do_sockopt(uint32_t flags, int s, int level, int optname,
 		len += *optlen;
 	}
 
-	open_socket();
-
+	ensure_control_socket_open();
+#if 0
+	{
+		char name[1001];
+		int n = socket_address_pretty(name, 1000, &_conf.cf_sa);
+		name[n] = '\0';
+		fprintf(stderr, "Control socket: %s\n", name);
+	}
+#endif
 	rc = sendto(_conf.cf_s, crap, len, 0,
-		    (struct sockaddr*) &_conf.cf_sun, sizeof(_conf.cf_sun));
+		    &_conf.cf_sa.addr.sa, _conf.cf_sa.addr_len);
 	if (rc == -1)
 		return -1;
 
@@ -310,7 +359,7 @@ int tcpcrypt_setsockopt(int s, int level, int optname, const void *optval,
 }
 
 /* for tcpcrypt_getsessid */
-int __open_socket_for_getsessid()
+static int __open_socket_for_getsessid()
 {
     int s;
     struct sockaddr_in s_in;

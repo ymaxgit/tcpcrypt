@@ -4,7 +4,8 @@ tcpcryptd_SOURCES = \
 	crypto_hmac.c crypto_dummy.c profile.c checksum.c test.c  \
 	crypto_hkdf.c \
 	crypto_reg.c crypto_ecdhe.c \
-	\
+	$(top_srcdir)/shared/socket_address.c \
+	$(top_srcdir)/shared/socket_address.h \
 	inc.h tcpcrypt_ctl.h tcpcrypt_divert.h tcpcrypt.h tcpcryptd.h \
 	profile.h checksum.h test.h crypto.h tcpcrypt_strings.h \
 	tcpcrypt_version.h

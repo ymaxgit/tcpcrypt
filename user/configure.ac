@@ -17,11 +17,14 @@ else
    AC_DEFINE([TCPCRYPTD_DIVERT_PORT], 666, [Default divert port for tcpcryptd])
 fi
 
-AC_ARG_VAR([CONTROL_PORT], [Default local control port for tcpcryptd])
-if test -n "$CONTROL_PORT"; then
-   AC_DEFINE_UNQUOTED([TCPCRYPTD_CONTROL_PORT], [$CONTROL_PORT], [Default local control port for tcpcryptd])
+AC_ARG_VAR([CONTROL_SOCKET],
+           [Default local control socket for tcpcryptd: unix-domain path or localhost port-number])
+if test -n "$CONTROL_SOCKET"; then
+    AC_DEFINE_UNQUOTED([TCPCRYPTD_CONTROL_SOCKET], [$CONTROL_SOCKET],
+        [Default local control socket for tcpcryptd: unix-domain path or localhost port-number])
 else
-   AC_DEFINE([TCPCRYPTD_CONTROL_PORT], 666, [Default local control port for tcpcryptd])
+    AC_DEFINE([TCPCRYPTD_CONTROL_SOCKET], "/var/run/tcpcryptd.control",
+        [Default local control socket for tcpcryptd: unix-domain path or localhost port-number])
 fi
 
 AC_ARG_VAR([JAIL_DIR], [Default jail directory for tcpcryptd])
@@ -55,9 +58,18 @@ AM_PROG_AS
 # Check platform
 AC_CANONICAL_HOST
 AC_MSG_CHECKING(OS)
+if [ echo $host_os | grep linux ]; then
+  os_linux=1
+else
+  os_linux=0
+fi
+AM_CONDITIONAL(OS_LINUX, [test "$os_linux" -eq 1])
 AM_CONDITIONAL(OS_BSD, [echo $host_os | grep -E 'darwin|freebsd'])
-AM_CONDITIONAL(OS_LINUX, [echo $host_os | grep linux])
-AM_CONDITIONAL(OS_MINGW, [echo $host_os | grep -E mingw])
+AM_CONDITIONAL(OS_MINGW, [echo $host_os | grep mingw])
+
+AS_IF([test "$os_linux" -eq 1],
+      [AC_DEFINE([OS_LINUX], 1, [Define to 1 if compiling for a Linux system])],
+      [AC_DEFINE([OS_LINUX], 0, [Define to 1 if compiling for a Linux system])])
 
 CFLAGS="$CFLAGS -Wall -Wno-deprecated-declarations"
 

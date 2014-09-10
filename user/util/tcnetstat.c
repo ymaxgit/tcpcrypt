@@ -71,6 +71,9 @@ static void do_netstat(void)
 
 int main(int argc, char **argv)
 {
-    do_netstat();
-    return 0;
+	if (argc >= 3 && !strcmp(argv[1], "-u")) {
+		tcpcrypt_setparam(TCPCRYPT_PARAM_CTLPATH, argv[2]);
+	}
+	do_netstat();
+	return 0;
 }

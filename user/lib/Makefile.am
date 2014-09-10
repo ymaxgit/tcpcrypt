@@ -1,7 +1,12 @@
 lib_LTLIBRARIES = libtcpcrypt.la
 libtcpcrypt_ladir = $(includedir)/tcpcrypt
-libtcpcrypt_la_HEADERS = $(top_srcdir)/include/tcpcrypt/tcpcrypt.h
-libtcpcrypt_la_SOURCES = sockopt.c $(top_srcdir)/src/tcpcrypt_ctl.h
+libtcpcrypt_la_HEADERS = \
+	$(top_srcdir)/include/tcpcrypt/tcpcrypt.h \
+	$(top_srcdir)/shared/socket_address.h
+libtcpcrypt_la_SOURCES = \
+	sockopt.c \
+	$(top_srcdir)/src/tcpcrypt_ctl.h \
+	$(top_srcdir)/shared/socket_address.c
 libtcpcrypt_la_CFLAGS  = -I$(top_srcdir)/include/ -iquote$(top_srcdir)/
 
 TCPCRYPT_LIBRARY_VERSION = 0:0:0

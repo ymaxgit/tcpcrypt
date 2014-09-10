@@ -74,8 +74,8 @@ set_iptables() {
 unset_iptables() {
     echo Removing iptables rules and quitting tcpcryptd...
 
-    iptables -D $IPT_INPUT
-    iptables -D $IPT_OUTPUT
+    ee iptables -D $IPT_INPUT
+    ee iptables -D $IPT_OUTPUT
 
     exit
 }

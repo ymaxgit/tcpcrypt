@@ -19,7 +19,7 @@ Tcpcrypt also requires OpenSSL >= 0.9.8, which is provided by the
 Compiling
 ---------
 
-    cd tcpcrypt/user
+    cd tcpcrypt
     ./bootstrap.sh
     ./configure
     make
@@ -30,7 +30,7 @@ headers, for building apps that use tcpcrypt's session ID.
 Running
 -------
 
-The launch script (in tcpcrypt/user) starts tcpcryptd and sets up your firewall
+The launch script starts tcpcryptd and sets up your firewall
 to send port 80 and 7777 packets through tcpcrypt:
 
     ./launch_tcpcryptd.sh
@@ -38,7 +38,7 @@ to send port 80 and 7777 packets through tcpcrypt:
 With tcpcryptd running, open
 [http://tcpcrypt.org/test.php](http://tcpcrypt.org/test.php) to try it out.
 
-See `contrib/freebsd` for a FreeBSD rc script that loads tcpcryptd on system startup.
+See `launchers/freebsd` for a FreeBSD rc script that loads tcpcryptd on system startup.
 
 More info
 ----------

@@ -16,7 +16,7 @@ Installing tcpcrypt
 -------------------
 
     git clone git://github.com/scslab/tcpcrypt.git
-    cd tcpcrypt/user
+    cd tcpcrypt
     ./bootstrap.sh
     ./configure
     make
@@ -50,7 +50,6 @@ with the cleartext packets you would see without tcpcryptd running.
 
 A final netcat example:
 
-    # in tcpcrypt/user
     sudo ./launch_tcpcryptd.sh & 
     nc -l 7777 &
     sudo tcpdump -i lo -n -s0 -vvvv -X tcp port 7777 &

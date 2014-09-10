@@ -9,7 +9,7 @@ Only cross-compiling for Windows on Linux (using mingw) is supported right now. 
 Using mingw, run the following commands to cross-compile tcpcrypt for Windows
 on a Linux host.
 
-    cd tcpcrypt/user
+    cd tcpcrypt
     ./bootstrap.sh
     ./configure CFLAGS="-mwin32 -D__WIN32__ -I/home/sqs/src/mingw/OpenSSL-Win32/include" LDFLAGS=" -L/home/sqs/src/mingw/OpenSSL-Win32/ " --host=i586-mingw32msvc
     make
@@ -61,7 +61,7 @@ Running
 =======
 
 After installing the divert socket driver, run the tcpcryptd daemon with the
-following command, from tcpcrypt/user:
+following command:
 
     ./launch_tcpcryptd.sh
 

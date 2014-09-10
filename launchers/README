@@ -1,0 +1,6 @@
+
+This directory contains utilities, provided by various contributors,
+that configure firewall rules and launch tcpcryptd.
+
+Consider them if launch_tcpcryptd.sh does not meet your needs.
+

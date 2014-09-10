@@ -15,6 +15,25 @@ A list of all options is produced by:
 
 > __tcpcryptd -h__
 
+Configuration of packet-diversion rules allows the system administrator to
+control which TCP connections are protected by __tcpcryptd__.
+The daemon receives packets for transformation via a "divert port",
+configurable with __-p__ _port_.
+
+The daemon communicates with user programs via a "control socket", configurable
+with __-u__ _socket_address_.  If _socket_address_ begins with "/", it is
+interpreted as a filesystem path pointing to a unix-domain socket; if it is
+of the form ":_port_", it is interpreted as the internet address localhost:_port_.
+
+Verbosity may be increased with multiple __-v__ options.
+
+A "phone-home" test will be performed at daemon startup to confirm end-to-end
+functionality of the implementation (by default, with the authors' server), but
+may be redirected to another test-server with __-s__ _hostname_ or disabled
+completely with __-f__.
+
+
+
 # DESCRIPTION
 
 The __tcpcryptd__ daemon transforms TCP segments via a kernel "divert" port in
@@ -57,26 +76,8 @@ Connection peers may ensure they are communicating securely with each other
 attackers) by confirming that the _tcpcrypt_ session ids derived at each end
 are identical.  For example, they may bind the session id together with a
 shared secret such as a password, sign it with public keys, use a voice
-connection to speak the fingerprint of it, or simply record it for later
+connection to speak a fingerprint of it, or simply record it for later
 confirmation.
-
-# CONFIGURATION
-
-Configuration of packet-diversion rules allows the system administrator to
-control which TCP connections are protected by __tcpcryptd__.
-
-The daemon communicates with the kernel via a "divert port", configurable with
-__-p__ _port_.
-
-The daemon communicates with user programs via a "control port", configurable
-with __-u__ _localhost_port_.
-
-Verbosity may be increased with multiple __-v__ options.
-
-A "phone-home" test will be performed at daemon startup to confirm end-to-end
-functionality of the implementation (by default, with the authors' server), but
-may be redirected to another test-server with __-s__ _hostname_ or disabled
-completely with __-f__.
 
 # SEE ALSO
 

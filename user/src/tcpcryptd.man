@@ -13,6 +13,25 @@ A list of all options is produced by:
 .PP
 \f[B]tcpcryptd \-h\f[]
 .RE
+.PP
+Configuration of packet\-diversion rules allows the system administrator
+to control which TCP connections are protected by \f[B]tcpcryptd\f[].
+The daemon receives packets for transformation via a "divert port",
+configurable with \f[B]\-p\f[] \f[I]port\f[].
+.PP
+The daemon communicates with user programs via a "control socket",
+configurable with \f[B]\-u\f[] \f[I]socket_address\f[].
+If \f[I]socket_address\f[] begins with "/", it is interpreted as a
+filesystem path pointing to a unix\-domain socket; if it is of the form
+":\f[I]port\f[]", it is interpreted as the internet address
+localhost:\f[I]port\f[].
+.PP
+Verbosity may be increased with multiple \f[B]\-v\f[] options.
+.PP
+A "phone\-home" test will be performed at daemon startup to confirm
+end\-to\-end functionality of the implementation (by default, with the
+authors\[aq] server), but may be redirected to another test\-server with
+\f[B]\-s\f[] \f[I]hostname\f[] or disabled completely with \f[B]\-f\f[].
 .SH DESCRIPTION
 .PP
 The \f[B]tcpcryptd\f[] daemon transforms TCP segments via a kernel
@@ -62,24 +81,7 @@ network attackers) by confirming that the \f[I]tcpcrypt\f[] session ids
 derived at each end are identical.
 For example, they may bind the session id together with a shared secret
 such as a password, sign it with public keys, use a voice connection to
-speak the fingerprint of it, or simply record it for later confirmation.
-.SH CONFIGURATION
-.PP
-Configuration of packet\-diversion rules allows the system administrator
-to control which TCP connections are protected by \f[B]tcpcryptd\f[].
-.PP
-The daemon communicates with the kernel via a "divert port",
-configurable with \f[B]\-p\f[] \f[I]port\f[].
-.PP
-The daemon communicates with user programs via a "control port",
-configurable with \f[B]\-u\f[] \f[I]localhost_port\f[].
-.PP
-Verbosity may be increased with multiple \f[B]\-v\f[] options.
-.PP
-A "phone\-home" test will be performed at daemon startup to confirm
-end\-to\-end functionality of the implementation (by default, with the
-authors\[aq] server), but may be redirected to another test\-server with
-\f[B]\-s\f[] \f[I]hostname\f[] or disabled completely with \f[B]\-f\f[].
+speak a fingerprint of it, or simply record it for later confirmation.
 .SH SEE ALSO
 .PP
 \f[B]tcnetstat\f[](8), <http://tcpcrypt.org/>

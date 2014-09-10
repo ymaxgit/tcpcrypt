@@ -9,7 +9,18 @@ protected by tcpcrypt
 .SH DESCRIPTION
 .PP
 The \f[B]tcnetstat\f[] utility prints the \f[I]session id\f[] of each
-TCP connection that is currently being managed by \f[B]tcpcryptd\f[](8).
+TCP connection that is currently being protected by the
+\f[I]tcpcrypt\f[] protocol.
+.SH OPTIONS
+.PP
+Where the \f[I]tcpcrypt\f[] protocol is implemented by the
+\f[B]tcpcryptd\f[] daemon, this utility communicates with the daemon via
+a "control socket", configurable with \f[B]\-u\f[]
+\f[I]socket_address\f[].
+If \f[I]socket_address\f[] begins with "/", it is interpreted as a
+filesystem path pointing to a unix\-domain socket; if it is of the form
+":\f[I]port\f[]", it is interpreted as the internet address
+localhost:\f[I]port\f[].
 .SH SEE ALSO
 .PP
 \f[B]tcpcryptd\f[](8), <http://tcpcrypt.org/>

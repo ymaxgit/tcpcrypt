@@ -1,0 +1,4 @@
+tcpcrypt_getsessid
+tcpcrypt_getsockopt
+tcpcrypt_setparam
+tcpcrypt_setsockopt

@@ -39,7 +39,7 @@ int socket_address_pretty(char *name, size_t size, struct socket_address *sa)
 				n = path_len;
 				if (n > size)
 					n = size;
-				strncpy(name, &sa->addr.un.sun_path, n);
+				strncpy(name, sa->addr.un.sun_path, n);
 				if (n < size)
 					name[n++] = '\0';
 			}

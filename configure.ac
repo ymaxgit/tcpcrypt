@@ -105,18 +105,16 @@ AM_CONDITIONAL(NO_ASM, test x$enable_asm = xno)
 AM_CONDITIONAL(HAVE_NI, false)
 
 # libs
-AC_CHECK_LIB([cap], [cap_set_flag])
-AC_CHECK_LIB([crypto], [EVP_OpenInit])
+AC_CHECK_LIB([cap], [cap_set_flag], [tcpcryptd_LDADD="-lcap $tcpcryptd_LDADD"])
+AC_CHECK_LIB([crypto], [EVP_OpenInit], [tcpcryptd_LDADD="-lcrypto $tcpcryptd_LDADD"])
 
-LDFLAGS="$LDFLAGS -L/usr/local/lib"
-AC_CHECK_LIB([netfilter_queue], [nfq_open])
+AC_CHECK_LIB([netfilter_queue], [nfq_open], [tcpcryptd_LDADD="-lnetfilter_queue $tcpcryptd_LDADD"])
 
-AC_CHECK_LIB([nfnetlink], [nfnl_rcvbufsiz])
+AC_CHECK_LIB([nfnetlink], [nfnl_rcvbufsiz], [tcpcryptd_LDADD="-lnfnetlink $tcpcryptd_LDADD"])
 AC_CHECK_LIB([pthread], [pthread_create])
-AC_CHECK_LIB([rt], [clock_gettime])
-AC_CHECK_LIB([z], [compress])
 AC_CHECK_LIB([wsock32], [bind]) # TODO: find symbol name
 AC_CHECK_LIB([iphlpapi], [GetAdaptersInfo]) # TODO: find symbol name
+AC_SUBST([tcpcryptd_LDADD])
 
 # Checks for header files.
 AC_CHECK_HEADERS([arpa/inet.h fcntl.h limits.h netinet/in.h stddef.h stdint.h stdlib.h string.h strings.h sys/socket.h sys/time.h unistd.h])

@@ -11,7 +11,7 @@ tcpcryptd_SOURCES = \
 	tcpcrypt_version.h
 
 tcpcryptd_CFLAGS = -I$(top_srcdir)/include/ -I$(top_srcdir)
-tcpcryptd_LDADD  = -lcrypto
+tcpcryptd_LDADD = @tcpcryptd_LDADD@
 
 if OS_BSD
 tcpcryptd_SOURCES += freebsd.c
@@ -19,7 +19,6 @@ endif
 
 if OS_LINUX
 tcpcryptd_SOURCES += linux.c
-tcpcryptd_LDADD += -lnetfilter_queue -lnfnetlink -lcap
 endif
 
 if OS_MINGW

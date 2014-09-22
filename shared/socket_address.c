@@ -7,7 +7,7 @@
 
 #include "socket_address.h"
 
-int socket_address_is_null(struct socket_address *sa)
+int socket_address_is_null(const struct socket_address *sa)
 {
 	return sa->addr_len == 0;
 }
@@ -17,7 +17,7 @@ void socket_address_clear(struct socket_address *sa)
 	sa->addr_len = 0;
 }
 
-int socket_address_pretty(char *name, size_t size, struct socket_address *sa)
+int socket_address_pretty(char *name, size_t size, const struct socket_address *sa)
 {
 	size_t n = 0;
 
@@ -56,6 +56,19 @@ int socket_address_pretty(char *name, size_t size, struct socket_address *sa)
 	}
 
 	return n;
+}
+
+char *socket_address_pathname(const struct socket_address *sa)
+{
+	if (socket_address_is_null(sa))
+		return NULL;
+
+	if (sa->addr.sa.sa_family == AF_UNIX
+	    && sa->addr_len > 0
+	    && sa->addr.un.sun_path[0] == '/')
+		return sa->addr.un.sun_path;
+
+	return NULL;
 }
 
 int resolve_socket_address_local(const char *descr, struct socket_address *sa,

@@ -14,6 +14,7 @@
 #include <time.h>
 #include <openssl/err.h>
 
+#include "shared/socket_address.h"
 #include "inc.h"
 #include "tcpcrypt_ctl.h"
 #include "tcpcrypt_divert.h"
@@ -22,7 +23,6 @@
 #include "profile.h"
 #include "test.h"
 #include "crypto.h"
-#include "shared/socket_address.h"
 #include "tcpcrypt_strings.h"
 #include "config.h"
 
@@ -64,6 +64,7 @@ struct network_test {
 static struct state {
 	struct backlog_ctl	s_backlog_ctl;
 	int			s_ctl;
+	struct socket_address	s_ctl_addr;
 	int			s_raw;
 	struct timer		s_timers;
 	struct timer		*s_timer_map[MAX_TIMERS];
@@ -90,6 +91,21 @@ static struct test _tests[] = {
 	{ test_mac_throughput, "Symmetric MAC throughput" },
 	{ test_dropper,	       "Packet dropper" },
 };
+
+static void ensure_socket_address_unlinked(struct socket_address *sa)
+{
+	char *path;
+
+	if (socket_address_is_null(sa))
+		return;
+
+	if ((path = socket_address_pathname(sa)) != NULL) {
+		if (unlink(path) != 0) {
+			if (errno != ENOENT)
+				warn("unlink(%s)", path);
+		}
+	}
+}
 
 static void cleanup()
 {
@@ -829,36 +845,37 @@ static void do_test(void)
 	printf("Test done\n");
 }
 
-int bind_control_socket(const char *descr)
+static int bind_control_socket(struct socket_address *sa, const char *descr)
 {
 	int r, s;
-	struct socket_address sa;
 	static const int error_len = 1000;
 	char error[error_len];
+	mode_t mask;
+	char *path;
 
-	r = resolve_socket_address_local(_conf.cf_ctl, &sa, error, error_len);
+	r = resolve_socket_address_local(_conf.cf_ctl, sa, error, error_len);
 	if (r != 0)
 		errx(1, "interpreting socket address '%s': %s", descr, error);
 	{
 		char name[1000];
-		socket_address_pretty(name, 1000, &sa);
+		socket_address_pretty(name, 1000, sa);
 		xprintf(XP_DEFAULT, "Opening control socket at %s\n", name);
 	}
 
-	if ((s = socket(sa.addr.sa.sa_family, SOCK_DGRAM, 0)) <= 0)
+	if ((s = socket(sa->addr.sa.sa_family, SOCK_DGRAM, 0)) <= 0)
 		err(1, "socket()");
 
-	if (sa.addr.sa.sa_family == AF_UNIX
-	    && sa.addr_len > 0
-	    && sa.addr.un.sun_path[0] == '/')
-	{
-		if (unlink(sa.addr.un.sun_path)) {
-			if (errno != ENOENT)
-				err(1, "trying to unlink() previous control socket");
-		}
-	}
-	if (bind(s, &sa.addr.sa, sa.addr_len) != 0)
+	ensure_socket_address_unlinked(sa);
+	mask = umask(0);
+	if (bind(s, &sa->addr.sa, sa->addr_len) != 0)
 		err(1, "bind()");
+	umask(mask);
+
+	/* in case of old systems where bind() ignores the umask: */
+	if ((path = socket_address_pathname(sa)) != NULL) {
+		if (chmod(path, 0777) != 0)
+			warnx("Setting permissions on control socket");
+	}
 
 	return s;
 }
@@ -867,7 +884,7 @@ void tcpcryptd(void)
 {
 	_state.s_divert = divert_open(_conf.cf_divert, packet_handler);
 
-	_state.s_ctl = bind_control_socket(_conf.cf_ctl);
+	_state.s_ctl = bind_control_socket(&_state.s_ctl_addr, _conf.cf_ctl);
 
 	drop_privs(_conf.cf_jail_dir, _conf.cf_jail_user);
 

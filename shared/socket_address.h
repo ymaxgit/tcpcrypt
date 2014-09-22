@@ -21,12 +21,14 @@ struct socket_address {
 
 #define SOCKET_ADDRESS_ANY { (socklen_t) sizeof(union sockaddr_any), {} }
 
-extern int socket_address_is_null(struct socket_address *sa);
+extern int socket_address_is_null(const struct socket_address *sa);
 
-void socket_address_clear(struct socket_address *sa);
+extern void socket_address_clear(struct socket_address *sa);
+
+extern char *socket_address_pathname(const struct socket_address *sa);
 
 extern int socket_address_pretty(char *name, size_t size,
-				 struct socket_address *sa);
+				 const struct socket_address *sa);
 
 extern int resolve_socket_address_local(const char *descr,
 					struct socket_address *sa,

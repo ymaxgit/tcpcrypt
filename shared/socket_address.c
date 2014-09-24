@@ -58,7 +58,7 @@ int socket_address_pretty(char *name, size_t size, const struct socket_address *
 	return n;
 }
 
-char *socket_address_pathname(const struct socket_address *sa)
+const char *socket_address_pathname(const struct socket_address *sa)
 {
 	if (socket_address_is_null(sa))
 		return NULL;

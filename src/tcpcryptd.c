@@ -94,7 +94,7 @@ static struct test _tests[] = {
 
 static void ensure_socket_address_unlinked(struct socket_address *sa)
 {
-	char *path;
+	const char *path;
 
 	if (socket_address_is_null(sa))
 		return;
@@ -851,7 +851,7 @@ static int bind_control_socket(struct socket_address *sa, const char *descr)
 	static const int error_len = 1000;
 	char error[error_len];
 	mode_t mask;
-	char *path;
+	const char *path;
 
 	r = resolve_socket_address_local(_conf.cf_ctl, sa, error, error_len);
 	if (r != 0)

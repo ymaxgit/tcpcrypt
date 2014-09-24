@@ -25,7 +25,7 @@ extern int socket_address_is_null(const struct socket_address *sa);
 
 extern void socket_address_clear(struct socket_address *sa);
 
-extern char *socket_address_pathname(const struct socket_address *sa);
+extern const char *socket_address_pathname(const struct socket_address *sa);
 
 extern int socket_address_pretty(char *name, size_t size,
 				 const struct socket_address *sa);

@@ -8,6 +8,7 @@ tcpcryptd_SOURCES = \
 	$(top_srcdir)/shared/socket_address.h \
 	inc.h tcpcrypt_ctl.h tcpcrypt_divert.h tcpcrypt.h tcpcryptd.h \
 	profile.h checksum.h test.h crypto.h tcpcrypt_strings.h \
+        util.c \
 	tcpcrypt_version.h
 
 tcpcryptd_CFLAGS = -I$(top_srcdir)/include/ -I$(top_srcdir)

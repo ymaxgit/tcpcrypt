@@ -128,16 +128,6 @@ static void sig(int num)
 	exit(0);
 }
 
-void *xmalloc(size_t sz)
-{
-	void *r = malloc(sz);
-
-	if (!r)
-		err(1, "malloc()");
-
-	return r;
-}
-
 void set_time(struct timeval *tv)
 {
 	_state.s_now	  = *tv;

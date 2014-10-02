@@ -22,3 +22,5 @@ m4/*
 config/*
 config.h.in
 configure
+.dirstamp
+

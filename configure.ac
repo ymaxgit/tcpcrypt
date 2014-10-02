@@ -7,7 +7,7 @@ AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_AUX_DIR(config)
 AC_CONFIG_MACRO_DIR([m4])
 
-AM_INIT_AUTOMAKE([1.9 foreign dist-xz -Wall])
+AM_INIT_AUTOMAKE([1.9 foreign dist-xz -Wall subdir-objects])
 AM_MAINTAINER_MODE([disable])
 
 AC_ARG_VAR([DIVERT_PORT], [Default divert port for tcpcryptd])
@@ -137,8 +137,5 @@ AC_FUNC_FORK
 AC_FUNC_MALLOC
 AC_CHECK_FUNCS([bzero clock_gettime gettimeofday inet_ntoa memmove memset select socket strchr strdup strtoul])
 
-AC_CONFIG_FILES([Makefile
-                 lib/Makefile
-                 src/Makefile
-                 util/Makefile])
+AC_CONFIG_FILES([Makefile])
 AC_OUTPUT

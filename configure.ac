@@ -106,7 +106,7 @@ AM_CONDITIONAL(HAVE_NI, false)
 
 # libs
 AC_CHECK_LIB([cap], [cap_set_flag], [tcpcryptd_LDADD="-lcap $tcpcryptd_LDADD"])
-AC_CHECK_LIB([crypto], [EVP_OpenInit], [tcpcryptd_LDADD="-lcrypto $tcpcryptd_LDADD"])
+AC_CHECK_LIB([crypto], [EVP_OpenInit], [crypto_LDADD="-lcrypto"])
 
 AC_CHECK_LIB([netfilter_queue], [nfq_open], [tcpcryptd_LDADD="-lnetfilter_queue $tcpcryptd_LDADD"])
 
@@ -115,6 +115,7 @@ AC_CHECK_LIB([pthread], [pthread_create])
 AC_CHECK_LIB([wsock32], [bind]) # TODO: find symbol name
 AC_CHECK_LIB([iphlpapi], [GetAdaptersInfo]) # TODO: find symbol name
 AC_SUBST([tcpcryptd_LDADD])
+AC_SUBST([crypto_LDADD])
 
 # Checks for header files.
 AC_CHECK_HEADERS([arpa/inet.h fcntl.h limits.h netinet/in.h stddef.h stdint.h stdlib.h string.h strings.h sys/socket.h sys/time.h unistd.h])

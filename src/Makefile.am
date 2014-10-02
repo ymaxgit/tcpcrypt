@@ -12,7 +12,7 @@ tcpcryptd_SOURCES = \
 	tcpcrypt_version.h
 
 tcpcryptd_CFLAGS = -I$(top_srcdir)/include/ -I$(top_srcdir)
-tcpcryptd_LDADD = @tcpcryptd_LDADD@
+tcpcryptd_LDADD = @tcpcryptd_LDADD@ @crypto_LDADD@
 
 if OS_BSD
 tcpcryptd_SOURCES += freebsd.c

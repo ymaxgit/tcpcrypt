@@ -1,7 +1,7 @@
 ACLOCAL_AMFLAGS = -I m4
 
 bin_PROGRAMS = util/tcnetstat src/tcpcryptd
-EXTRA_DIST = src/tcpcryptd.man.md launch_tcpcryptd.sh util/tcnetstat.man.md
+EXTRA_DIST = src/tcpcryptd.man.md launch_tcpcryptd.sh util/tcnetstat.man.md src/tcpcrypt_version.h
 dist_man8_MANS = src/tcpcryptd.man util/tcnetstat.man
 lib_LTLIBRARIES = lib/libtcpcrypt.la
 

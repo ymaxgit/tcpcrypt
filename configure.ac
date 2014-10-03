@@ -137,5 +137,5 @@ AC_FUNC_FORK
 AC_FUNC_MALLOC
 AC_CHECK_FUNCS([bzero clock_gettime gettimeofday inet_ntoa memmove memset select socket strchr strdup strtoul])
 
-AC_CONFIG_FILES([Makefile])
+AC_CONFIG_FILES([Makefile src/tcpcrypt_version.h])
 AC_OUTPUT

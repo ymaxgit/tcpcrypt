@@ -3,3 +3,4 @@
 .*.swp
 core
 tcpcryptd
+tcpcrypt_version.h

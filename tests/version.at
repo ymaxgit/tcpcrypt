@@ -1,0 +1,15 @@
+AT_SETUP([tcpcryptd version])
+
+AT_CHECK([tcpcryptd -V],
+         [0],
+         [AT_PACKAGE_NAME version AT_PACKAGE_VERSION
+],
+[],
+[],
+[
+echo '=============================================================='
+echo 'WARNING: Not using the expected version, *all* checks dubious...'
+echo '=============================================================='
+])
+
+AT_CLEANUP

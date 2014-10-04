@@ -1,0 +1,3 @@
+# configuration data specifically for testing #
+
+PATH=@abs_top_srcdir@/src:$PATH

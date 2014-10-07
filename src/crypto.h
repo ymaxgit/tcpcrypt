@@ -24,7 +24,7 @@ struct crypt {
 	void	(*c_destroy)(struct crypt *c);
 	int	(*c_set_key)(struct crypt *c, void *key, int len);
 	int	(*c_get_key)(struct crypt *c, void **out);
-	void	(*c_mac)(struct crypt *, struct iovec *iov, int num, void *out,
+	void	(*c_mac)(struct crypt *, const struct iovec *iov, int num, void *out,
 		         int *outlen);
 	void	(*c_extract)(struct crypt *c, struct iovec *iov, int num,
 			     void *out, int *outlen);

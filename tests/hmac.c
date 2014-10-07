@@ -6,18 +6,15 @@
 
 
 
-/* FIXME: should all be const! */
 struct testcase {
 	const char* name;
-	struct iovec key;
-	struct iovec data;
-	struct iovec answer;
+	const struct iovec key;
+	const struct iovec data;
+	const struct iovec answer;
 };
 
 /* Test cases from RFC 4231 (https://tools.ietf.org/html/rfc4231) */
-
-/* FIXME: should be const */
-static struct testcase tests[] = {
+static const struct testcase tests[] = {
 	{ "RFC 4231 Test Case 1",
 	  {"\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b"
 	   "\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b", 20},

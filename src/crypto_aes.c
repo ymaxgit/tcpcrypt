@@ -143,7 +143,7 @@ static int aes_set_key(struct crypt *c, void *key, int len)
 	return 0;
 }
 
-static void aes_ack_mac(struct crypt *c, struct iovec *iov, int num, void *out,
+static void aes_ack_mac(struct crypt *c, const struct iovec *iov, int num, void *out,
                         int *outlen)
 {
 	struct aes_priv *ap = crypt_priv(c);

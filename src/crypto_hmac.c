@@ -32,7 +32,7 @@ static void hmac_destroy(struct crypt *c)
 	free(c);
 }
 
-static void hmac_mac(struct crypt *c, struct iovec *iov, int num,
+static void hmac_mac(struct crypt *c, const struct iovec *iov, int num,
 	             void *out, int *outlen)
 {
 	struct hmac_priv *hp = crypt_priv(c);

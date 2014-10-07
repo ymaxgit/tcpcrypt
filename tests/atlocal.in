@@ -1,3 +1,3 @@
 # configuration data specifically for testing #
 
-PATH=@abs_top_srcdir@/src:$PATH
+PATH=@abs_top_srcdir@/src:@abs_top_srcdir@/tests:$PATH

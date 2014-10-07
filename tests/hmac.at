@@ -1,0 +1,8 @@
+AT_SETUP([HMAC])
+
+AT_CHECK([hmac],
+         [0],
+         [OK
+])
+
+AT_CLEANUP

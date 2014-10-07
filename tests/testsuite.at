@@ -8,3 +8,4 @@ AT_INIT
 AT_TESTED([tcpcryptd])
 
 m4_include([tests/version.at])
+m4_include([tests/hmac.at])

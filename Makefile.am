@@ -100,6 +100,8 @@ tests/package.m4: $(top_srcdir)/configure.ac
 tests/atconfig: config.status
 	./config.status $@
 
+ALL_TESTS = tests/version.at tests/hmac.at
+
 check-local: tests/atconfig tests/atlocal $(TESTSUITE)
 	$(SHELL) '$(TESTSUITE)' $(TESTSUITEFLAGS)
 
@@ -110,9 +112,29 @@ installcheck-local: tests/atconfig tests/atlocal $(TESTSUITE)
 clean-local:
 	test ! -f '$(TESTSUITE)' || \
 	 $(SHELL) '$(TESTSUITE)' --clean
+	rm -f '$(TESTSUITE)'
 
 AUTOM4TE = $(SHELL) $(srcdir)/config/missing --run autom4te
 AUTOTEST = $(AUTOM4TE) --language=autotest
-$(TESTSUITE): tests/testsuite.at tests/package.m4
+$(TESTSUITE): tests/testsuite.at tests/package.m4 $(ALL_TESTS)
 	$(AUTOTEST) -I '$(srcdir)' -o $@.tmp $@.at
 	mv $@.tmp $@
+
+## test programs:
+
+## all tests against crypto elements should include these:
+cryptosources = \
+ src/inc.h \
+ src/crypto.h \
+ src/profile.h \
+ src/crypto.c \
+ src/profile.c \
+ src/util.c
+
+check_PROGRAMS = tests/hmac
+
+tests_hmac_SOURCES = tests/hmac.c \
+  src/crypto_hmac.c \
+  $(cryptosources)
+
+tests_hmac_LDADD = @crypto_LDADD@

@@ -29,7 +29,7 @@ lib_libtcpcrypt_la_SOURCES = \
 	shared/socket_address.c \
 	lib/libtcpcrypt.sym
 
-lib_libtcpcrypt_la_CFLAGS = -export-symbols lib/libtcpcrypt.sym
+lib_libtcpcrypt_la_CFLAGS = $(AM_CFLAGS) -export-symbols lib/libtcpcrypt.sym
 
 TCPCRYPT_LIBRARY_VERSION = 0:0:0
 lib_libtcpcrypt_la_LDFLAGS = -version-info $(TCPCRYPT_LIBRARY_VERSION)

@@ -1012,7 +1012,7 @@ static void usage(char *prog)
 	int i;
 
 	printf("Usage: %s <opt>\n"
-	       "-h\thelp\n"
+	       "-h\thelp (or --help)\n"
 	       "-p\t<divert port> (default: %d)\n"
 	       "-v\tverbose\n"
 	       "-d\tdisable\n"
@@ -1035,7 +1035,7 @@ static void usage(char *prog)
 	       "-i\tdisable timers\n"
 	       "-f\tdisable network test\n"
 	       "-s\t<network test server> (default: " TCPCRYPTD_TEST_SERVER ")\n"
-	       "-V\tshow version\n"
+	       "-V\tshow version (or --version)\n"
 	       "-U\t<jail username> (default: " TCPCRYPTD_JAIL_USER ")\n"
 	       "-J\t<jail directory> (default: " TCPCRYPTD_JAIL_DIR ")\n"
 	       , prog, TCPCRYPTD_DIVERT_PORT);
@@ -1061,6 +1061,19 @@ int main(int argc, char *argv[])
 	_conf.cf_test_server = TCPCRYPTD_TEST_SERVER;
 	_conf.cf_jail_dir    = TCPCRYPTD_JAIL_DIR;
 	_conf.cf_jail_user   = TCPCRYPTD_JAIL_USER;
+
+	if (argc == 2 && argv[1][0] == '-' && argv[1][1] == '-') {
+		if (strcmp(argv[1], "--help") == 0) {
+			usage(argv[0]);
+			exit(0);
+		} else if (strcmp(argv[1], "--version") == 0) {
+			printf("tcpcrypt version %s\n", TCPCRYPT_VERSION);
+			exit(0);
+		} else {
+			usage(argv[0]);
+			exit(1);
+		}			
+	}
 
 	while ((ch = getopt(argc, argv, "hp:vdu:camnPt:T:S:Dx:NC:M:r:Rifs:VU:J:"))
 	       != -1) {

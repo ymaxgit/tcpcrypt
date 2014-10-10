@@ -9,8 +9,8 @@
 #include <stdlib.h>
 
 #include <tcpcrypt/tcpcrypt.h>
-#include "src/tcpcrypt_ctl.h"
 #include "shared/socket_address.h"
+#include "tcpcrypt_ctl.h"
 #include "config.h"
 
 #define MAX_LEN	1200

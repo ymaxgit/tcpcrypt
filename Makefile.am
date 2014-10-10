@@ -5,10 +5,13 @@ dist_man8_MANS = src/tcpcryptd.man util/tcnetstat.man
 lib_LTLIBRARIES = lib/libtcpcrypt.la
 TESTSUITE = tests/testsuite
 TESTSUITEFLAGS = --directory tests
-EXTRA_DIST = src/tcpcryptd.man.md launch_tcpcryptd.sh util/tcnetstat.man.md src/tcpcrypt_version.h \
-  tests/testsuite.at tests/package.m4 $(TESTSUITE) tests/atlocal.in
-
-AM_CFLAGS = -Iinclude -I. -Isrc
+EXTRA_DIST = \
+	launch_tcpcryptd.sh \
+	src/tcpcrypt_version.h \
+	src/tcpcryptd.man.md util/tcnetstat.man.md \
+	tests/package.m4 tests/atlocal.in \
+	tests/testsuite.at tests/version.at tests/hmac.at \
+	$(TESTSUITE)
 
 if MAINTAINER_MODE
 SUFFIXES = .man.md .man
@@ -16,7 +19,10 @@ SUFFIXES = .man.md .man
 	pandoc -s -w man $^ -o $@
 endif
 
+TCPCRYPT_SRC = $(srcdir)/src
+TCPCRYPT_INCLUDE = $(srcdir)/include
 
+AM_CFLAGS = -I$(TCPCRYPT_SRC) -I$(TCPCRYPT_INCLUDE)
 
 # lib/ -- builds libtcpcrypt
 
@@ -25,23 +31,26 @@ lib_libtcpcrypt_la_HEADERS = include/tcpcrypt/tcpcrypt.h
 lib_libtcpcrypt_la_SOURCES = \
 	lib/sockopt.c \
 	src/tcpcrypt_ctl.h \
-	shared/socket_address.h \
-	shared/socket_address.c \
 	lib/libtcpcrypt.sym
 
-lib_libtcpcrypt_la_CFLAGS = $(AM_CFLAGS) -export-symbols lib/libtcpcrypt.sym
-
 TCPCRYPT_LIBRARY_VERSION = 0:0:0
-lib_libtcpcrypt_la_LDFLAGS = -version-info $(TCPCRYPT_LIBRARY_VERSION)
+lib_libtcpcrypt_la_LDFLAGS = \
+	-version-info $(TCPCRYPT_LIBRARY_VERSION) \
+	-export-symbols $(top_srcdir)/lib/libtcpcrypt.sym
 
 if OS_MINGW
 lib_libtcpcrypt_la_LIBADD = -lws2_32
 endif
 
+
 # util/ -- builds tcnetstat
 
-util_tcnetstat_SOURCES = util/tcnetstat.c libtcpcrypt.la include/tcpcrypt/tcpcrypt.h
-util_tcnetstat_LDADD = lib/libtcpcrypt.la
+util_tcnetstat_SOURCES = \
+	util/tcnetstat.c \
+	include/tcpcrypt/tcpcrypt.h \
+	lib/libtcpcrypt.la
+
+util_tcnetstat_LDADD = lib/libtcpcrypt.la shared/libsocket_address.a
 
 if OS_MINGW
 util_tcnetstat_LDADD	  += -lwsock32 -liphlpapi
@@ -55,17 +64,15 @@ src_tcpcryptd_SOURCES = \
 	src/crypto_hmac.c src/crypto_dummy.c src/profile.c src/checksum.c src/test.c  \
 	src/crypto_hkdf.c \
 	src/crypto_reg.c src/crypto_ecdhe.c \
-	shared/socket_address.c \
-	shared/socket_address.h \
 	src/inc.h src/tcpcrypt_ctl.h src/tcpcrypt_divert.h src/tcpcrypt.h src/tcpcryptd.h \
 	src/profile.h src/checksum.h src/test.h src/crypto.h src/tcpcrypt_strings.h \
         src/util.c \
 	src/tcpcrypt_version.h
 
-src_tcpcryptd_LDADD = @tcpcryptd_LDADD@ @crypto_LDADD@
+src_tcpcryptd_LDADD = @tcpcryptd_LDADD@ @crypto_LDADD@ shared/libsocket_address.a
 
 if OS_BSD
-src_tcpcryptd_SOURCES += freebsd.c
+src_tcpcryptd_SOURCES += src/freebsd.c
 endif
 
 if OS_LINUX
@@ -84,7 +91,13 @@ src_tcpcryptd_SOURCES += src/checksum_32.S
 endif
 
 
-# tests
+# shared/
+
+noinst_LIBRARIES = shared/libsocket_address.a
+shared_libsocket_address_a_SOURCES = shared/socket_address.c shared/socket_address.h
+
+
+# tests/
 
 tests/package.m4: $(top_srcdir)/configure.ac
 	{ \
@@ -102,17 +115,18 @@ tests/atconfig: config.status
 
 ALL_TESTS = tests/version.at tests/hmac.at
 
+RUN_TESTSUITE = $(SHELL) $(srcdir)/tests/testsuite $(TESTSUITEFLAGS)
+
 check-local: tests/atconfig tests/atlocal $(TESTSUITE)
-	$(SHELL) '$(TESTSUITE)' $(TESTSUITEFLAGS)
+	$(RUN_TESTSUITE) AUTOTEST_PATH='tests:src:util'
 
 installcheck-local: tests/atconfig tests/atlocal $(TESTSUITE)
-	$(SHELL) '$(TESTSUITE)' AUTOTEST_PATH='$(bindir)' \
-	  $(TESTSUITEFLAGS)
+	$(RUN_TESTSUITE) AUTOTEST_PATH='tests:$(bindir)'
 
 clean-local:
-	test ! -f '$(TESTSUITE)' || \
-	 $(SHELL) '$(TESTSUITE)' --clean
+	$(RUN_TESTSUITE) --clean
 	rm -f '$(TESTSUITE)'
+	rm -f tests/atconfig
 
 AUTOM4TE = $(SHELL) $(srcdir)/config/missing --run autom4te
 AUTOTEST = $(AUTOM4TE) --language=autotest

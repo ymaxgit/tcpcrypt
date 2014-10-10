@@ -1180,13 +1180,13 @@ int main(int argc, char *argv[])
 	resolve_server();
 
 	if (signal(SIGINT, sig) == SIG_ERR)
-		err(1, "signal()");
+		err(1, "signal(SIGINT)");
 
 	if (signal(SIGTERM, sig) == SIG_ERR)
-		err(1, "signal()");
+		err(1, "signal(SIGTERM)");
 #ifndef __WIN32__
 	if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
-		err(1, "signal()");
+		err(1, "signal(SIGPIPE)");
 #endif
 	profile_setopt(PROFILE_DISCARD, 3);
 	profile_setopt(PROFILE_ENABLE, _conf.cf_profile);

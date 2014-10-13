@@ -24,6 +24,9 @@ TCPCRYPT_INCLUDE = $(srcdir)/include
 
 AM_CFLAGS = -I$(TCPCRYPT_SRC) -I$(TCPCRYPT_INCLUDE)
 
+# include generated headers like tcpcrypt_version.h
+AM_CFLAGS += -I$(builddir)/src
+
 # lib/ -- builds libtcpcrypt
 
 lib_libtcpcrypt_ladir = $(includedir)/tcpcrypt
@@ -66,7 +69,7 @@ src_tcpcryptd_SOURCES = \
 	src/crypto_reg.c src/crypto_ecdhe.c \
 	src/inc.h src/tcpcrypt_ctl.h src/tcpcrypt_divert.h src/tcpcrypt.h src/tcpcryptd.h \
 	src/profile.h src/checksum.h src/test.h src/crypto.h src/tcpcrypt_strings.h \
-        src/util.c \
+	src/util.c \
 	src/tcpcrypt_version.h
 
 src_tcpcryptd_LDADD = @tcpcryptd_LDADD@ @crypto_LDADD@ shared/libsocket_address.a
@@ -124,7 +127,7 @@ installcheck-local: tests/atconfig tests/atlocal $(TESTSUITE)
 	$(RUN_TESTSUITE) AUTOTEST_PATH='tests:$(bindir)'
 
 clean-local:
-	$(RUN_TESTSUITE) --clean
+	test ! -f '$(TESTSUITE)' || $(RUN_TESTSUITE) --clean
 	rm -f '$(TESTSUITE)'
 	rm -f tests/atconfig
 

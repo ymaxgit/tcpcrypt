@@ -23,4 +23,5 @@ config/*
 config.h.in
 configure
 .dirstamp
-
+tcpcrypt-*.tar.gz
+tcpcrypt-*.tar.xz

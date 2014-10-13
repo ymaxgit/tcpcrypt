@@ -15,10 +15,23 @@ Dependencies
  * Kernel divert socket support (NFQUEUE)
 
 
-Ubuntu and Debian packages
---------------------------
+Ubuntu and Debian package dependencies
+--------------------------------------
     apt-get install iptables libcap-dev libssl-dev \
                     libnfnetlink-dev libnetfilter-queue-dev
+
+
+Arch Linux package dependencies
+-------------------------------
+
+pacman -S --needed \
+        base-devel \
+        iptables \
+        openssl \
+        libnfnetlink \
+        libnetfilter_queue \
+        libcap \
+        libnetfilter_queue
 
 
 Kernel divert sockets (NFQUEUE)
@@ -44,7 +57,7 @@ Compiling
 
 Run:
 
-    cd tcpcrypt/user
+    cd tcpcrypt
     ./bootstrap.sh
     ./configure
     make

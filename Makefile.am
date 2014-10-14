@@ -39,8 +39,7 @@ PRIV_LDADD += -lcap
 endif
 endif
 
-
-# lib/ -- builds libtcpcrypt
+# lib_libtcpcrypt
 
 lib_libtcpcrypt_ladir = $(includedir)/tcpcrypt
 lib_libtcpcrypt_la_HEADERS = include/tcpcrypt/tcpcrypt.h
@@ -59,33 +58,30 @@ lib_libtcpcrypt_la_LIBADD = -lws2_32
 endif
 
 
-# util/ -- builds tcnetstat, tcs
+# util_tcnetstat
 
 util_tcnetstat_SOURCES = \
 	util/tcnetstat.c \
 	include/tcpcrypt/tcpcrypt.h \
+	shared/socket_address.c shared/socket_address.h \
 	lib/libtcpcrypt.la
 
-util_tcnetstat_LDADD = \
-	lib/libtcpcrypt.la \
-	shared/libsocket_address.a
-
+util_tcnetstat_LDADD = lib/libtcpcrypt.la
 if OS_MINGW
-util_tcnetstat_LDADD	  += -lwsock32 -liphlpapi
+util_tcnetstat_LDADD += -lwsock32 -liphlpapi
 endif
 
-util_tcs_SOURCES = \
-	util/tcs.c \
-	src/util.c src/util.h \
+
+# util_tcs
+
+util_tcs_SOURCES = util/tcs.c \
+	shared/socket_address.c shared/socket_address.h \
 	$(PRIV_SOURCES)
 
-util_tcs_LDADD = \
-	lib/libtcpcrypt.la \
-	shared/libsocket_address.a \
-	$(PRIV_LDADD)
+util_tcs_LDADD = lib/libtcpcrypt.la $(PRIV_LDADD)
 
 
-# src/ -- builds tcpcryptd
+# src_tcpcryptd
 
 src_tcpcryptd_SOURCES = \
 	src/tcpcryptd.c src/tcpcrypt.c src/crypto.c src/crypto_rsa.c src/crypto_aes.c \
@@ -96,9 +92,10 @@ src_tcpcryptd_SOURCES = \
 	src/profile.h src/checksum.h src/test.h src/crypto.h src/tcpcrypt_strings.h \
 	src/util.c src/util.h \
 	src/tcpcrypt_version.h \
+	shared/socket_address.c shared/socket_address.h \
 	$(PRIV_SOURCES)
 
-src_tcpcryptd_LDADD = @tcpcryptd_LDADD@ @crypto_LDADD@ shared/libsocket_address.a
+src_tcpcryptd_LDADD = @tcpcryptd_LDADD@ @crypto_LDADD@
 
 if OS_BSD
 src_tcpcryptd_SOURCES += src/freebsd.c
@@ -118,12 +115,6 @@ endif
 if !NO_ASM
 src_tcpcryptd_SOURCES += src/checksum_32.S
 endif
-
-
-# shared/
-
-noinst_LIBRARIES = shared/libsocket_address.a
-shared_libsocket_address_a_SOURCES = shared/socket_address.c shared/socket_address.h
 
 
 # tests/

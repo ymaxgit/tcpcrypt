@@ -20,11 +20,13 @@
 #include "tcpcrypt_divert.h"
 #include "tcpcrypt.h"
 #include "tcpcryptd.h"
+#include "priv.h"
 #include "profile.h"
 #include "test.h"
 #include "crypto.h"
 #include "tcpcrypt_strings.h"
 #include "config.h"
+#include "util.h"
 
 #define ARRAY_SIZE(n)	(sizeof(n) / sizeof(*n))
 #define MAX_TIMERS 1024
@@ -870,13 +872,19 @@ static int bind_control_socket(struct socket_address *sa, const char *descr)
 	return s;
 }
 
+void _drop_privs(const char *dir, const char *name) {
+	xprintf(XP_DEFAULT, "Attempting to drop privileges with chroot=%s and user=%s\n",
+		dir ? dir : "(NONE)", name ? name : "(NONE)");
+	drop_privs(dir, name);
+}
+
 void tcpcryptd(void)
 {
 	_state.s_divert = divert_open(_conf.cf_divert, packet_handler);
 
 	_state.s_ctl = bind_control_socket(&_state.s_ctl_addr, _conf.cf_ctl);
 
-	drop_privs(_conf.cf_jail_dir, _conf.cf_jail_user);
+	_drop_privs(_conf.cf_jail_dir, _conf.cf_jail_user);
 
 	printf("Running\n");
 

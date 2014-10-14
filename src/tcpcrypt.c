@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "inc.h"
+#include "util.h"
 #include "tcpcrypt.h"
 #include "tcpcrypt_divert.h"
 #include "tcpcryptd.h"

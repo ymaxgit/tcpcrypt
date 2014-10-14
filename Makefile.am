@@ -27,6 +27,19 @@ AM_CFLAGS = -I$(TCPCRYPT_SRC) -I$(TCPCRYPT_INCLUDE)
 # include generated headers like tcpcrypt_version.h
 AM_CFLAGS += -I$(builddir)/src
 
+PRIV_SOURCES = src/priv.h
+PRIV_LDADD =
+if OS_MINGW
+PRIV_SOURCES += win/priv.c
+else
+PRIV_SOURCES += unix/priv.c
+if OS_LINUX
+PRIV_SOURCES += unix/linux/priv.c
+PRIV_LDADD += -lcap
+endif
+endif
+
+
 # lib/ -- builds libtcpcrypt
 
 lib_libtcpcrypt_ladir = $(includedir)/tcpcrypt
@@ -61,10 +74,15 @@ if OS_MINGW
 util_tcnetstat_LDADD	  += -lwsock32 -liphlpapi
 endif
 
-util_tcs_SOURCES = util/tcs.c
+util_tcs_SOURCES = \
+	util/tcs.c \
+	src/util.c src/util.h \
+	$(PRIV_SOURCES)
+
 util_tcs_LDADD = \
 	lib/libtcpcrypt.la \
-	shared/libsocket_address.a
+	shared/libsocket_address.a \
+	$(PRIV_LDADD)
 
 
 # src/ -- builds tcpcryptd
@@ -76,8 +94,9 @@ src_tcpcryptd_SOURCES = \
 	src/crypto_reg.c src/crypto_ecdhe.c \
 	src/inc.h src/tcpcrypt_ctl.h src/tcpcrypt_divert.h src/tcpcrypt.h src/tcpcryptd.h \
 	src/profile.h src/checksum.h src/test.h src/crypto.h src/tcpcrypt_strings.h \
-	src/util.c \
-	src/tcpcrypt_version.h
+	src/util.c src/util.h \
+	src/tcpcrypt_version.h \
+	$(PRIV_SOURCES)
 
 src_tcpcryptd_LDADD = @tcpcryptd_LDADD@ @crypto_LDADD@ shared/libsocket_address.a
 

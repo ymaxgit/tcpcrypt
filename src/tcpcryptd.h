@@ -67,10 +67,9 @@ extern struct conf _conf;
 typedef void (*timer_cb)(void *a);
 typedef int  (*packet_hook)(int rc, void *packet, int len, int flags); 
 
-extern void xprintf(int level, char *fmt, ...);
 extern void *add_timer(unsigned int usec, timer_cb cb, void *arg);
 extern void clear_timer(void *timer);
-extern void *xmalloc(size_t sz);
+extern void xprintf(int level, char *fmt, ...);
 extern void hexdump(void *p, int len);
 extern void errssl(int x, char *fmt, ...);
 extern void set_time(struct timeval *tv);
@@ -78,8 +77,6 @@ extern void tcpcryptd(void);
 extern void set_packet_hook(int post, packet_hook hook);
 extern char *driver_param(int x);
 extern char *test_param(int x);
-extern void drop_privs(const char *dir, const char *name);
-extern void linux_drop_privs(uid_t uid);
 
 extern uint64_t xbe64toh(uint64_t x);
 extern uint64_t xhtobe64(uint64_t x);

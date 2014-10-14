@@ -5,11 +5,13 @@
 #include <unistd.h>
 #include <stdint.h>
 
+#include "config.h"
 #include "src/inc.h"
 #include "src/tcpcryptd.h"
 #include "src/tcpcrypt.h"
 #include "src/tcpcrypt_ctl.h"
 #include "src/tcpcrypt_strings.h"
+#include "src/priv.h"
 
 static const char *_bind_ip = "0.0.0.0";
 
@@ -365,11 +367,7 @@ static void pwn(void)
 
 	tzset();
 
-#ifndef __WIN32__
-	chroot("/tmp");
-	setgid(666);
-	setuid(666);
-#endif
+	drop_privs(TCPCRYPTD_JAIL_DIR, TCPCRYPTD_JAIL_USER);
 
 	while (1)
 		check_sockets();

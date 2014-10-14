@@ -1,6 +1,6 @@
 ACLOCAL_AMFLAGS = -I m4
 
-bin_PROGRAMS = util/tcnetstat src/tcpcryptd
+bin_PROGRAMS =  src/tcpcryptd util/tcnetstat util/tcs
 dist_man8_MANS = src/tcpcryptd.man util/tcnetstat.man
 lib_LTLIBRARIES = lib/libtcpcrypt.la
 TESTSUITE = tests/testsuite
@@ -46,18 +46,25 @@ lib_libtcpcrypt_la_LIBADD = -lws2_32
 endif
 
 
-# util/ -- builds tcnetstat
+# util/ -- builds tcnetstat, tcs
 
 util_tcnetstat_SOURCES = \
 	util/tcnetstat.c \
 	include/tcpcrypt/tcpcrypt.h \
 	lib/libtcpcrypt.la
 
-util_tcnetstat_LDADD = lib/libtcpcrypt.la shared/libsocket_address.a
+util_tcnetstat_LDADD = \
+	lib/libtcpcrypt.la \
+	shared/libsocket_address.a
 
 if OS_MINGW
 util_tcnetstat_LDADD	  += -lwsock32 -liphlpapi
 endif
+
+util_tcs_SOURCES = util/tcs.c
+util_tcs_LDADD = \
+	lib/libtcpcrypt.la \
+	shared/libsocket_address.a
 
 
 # src/ -- builds tcpcryptd
@@ -129,6 +136,7 @@ installcheck-local: tests/atconfig tests/atlocal $(TESTSUITE)
 clean-local:
 	test ! -f '$(TESTSUITE)' || $(RUN_TESTSUITE) --clean
 	rm -f '$(TESTSUITE)'
+	rm -f tests/testsuite.log
 	rm -f tests/atconfig
 
 AUTOM4TE = $(SHELL) $(srcdir)/config/missing --run autom4te

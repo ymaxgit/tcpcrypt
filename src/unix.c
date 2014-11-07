@@ -57,7 +57,13 @@ void divert_inject(void *data, int len)
         s_in.sin_addr   = ip->ip_dst;
         s_in.sin_port   = tcp->th_dport;
 
-#if defined(__FreeBSD__) || defined(__DARWIN_UNIX03)
+#if defined(__FreeBSD__)
+#include <osreldate.h>
+#if __FreeBSD_version < 1000022
+       #define HO_LEN
+#endif
+#endif
+#ifdef __DARWIN_UNIX03
 	#define HO_LEN
 #endif
 #ifdef HO_LEN

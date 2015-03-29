@@ -300,7 +300,13 @@ struct tc_init2 {
 	uint32_t		i2_len;
 	struct tc_scipher	i2_scipher;
 	uint8_t			i2_data[0];
-};
+} __attribute__ ((__packed__));
+
+struct tc_record {
+	uint16_t tr_len;
+	uint16_t tr_type;
+	uint8_t  tr_data[0];
+} __attribute__ ((__packed__));
 
 struct cipher_list;
 

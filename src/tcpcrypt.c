@@ -1156,7 +1156,6 @@ static void generate_nonce(struct tc *tc, int len)
 static int do_output_pkconf_rcvd(struct tc *tc, struct ip *ip,
 				 struct tcphdr *tcp, int retx)
 {
-	struct tc_subopt *tcs;
 	int len, klen;
 	struct tc_init1 *init1;
 	void *key;
@@ -1164,10 +1163,6 @@ static int do_output_pkconf_rcvd(struct tc *tc, struct ip *ip,
 
 	if (!retx)
 		generate_nonce(tc, tc->tc_crypt_pub->cp_n_c);
-
-	tcs = subopt_alloc(tc, ip, tcp, 1);
-	assert(tcs);
-	tcs->tcs_op = TCOP_INIT1;
 
 	klen = crypt_get_key(tc->tc_crypt_pub->cp_pub, &key);
 	len  = sizeof(*init1) 
@@ -1213,16 +1208,36 @@ static int do_output_init1_rcvd(struct tc *tc, struct ip *ip,
 	return DIVERT_ACCEPT;
 }
 
+static int is_init(struct ip *ip, struct tcphdr *tcp, int init)
+{
+	struct tc_init2 *i2 = tcp_data(tcp);
+	int dlen = tcp_data_len(ip, tcp);
+
+	if (dlen < sizeof(*i2))
+		return 0;
+
+	if (ntohl(i2->i2_magic) != init)
+		return 0;
+
+	if (dlen != ntohl(i2->i2_len))
+		return 0;
+
+	if (init == TC_INIT1 && dlen < sizeof(struct tc_init1))
+		return 0;
+
+	return 1;
+}
+
 static int do_output_init2_sent(struct tc *tc, struct ip *ip,
 				struct tcphdr *tcp)
 {
 	/* we generated this packet */
-	struct tc_subopt *opt = find_subopt(tcp, TCOP_INIT2);
+	int is_init2 = is_init(ip, tcp, TC_INIT2);
 
 	/* kernel is getting pissed off and is resending SYN ack (because we're
 	 * delaying his connect setup)
 	 */
-	if (!opt) {
+	if (!is_init2) {
 		/* we could piggy back / retx init2 */
 
 		assert(tcp_data_len(ip, tcp) == 0);
@@ -1230,8 +1245,9 @@ static int do_output_init2_sent(struct tc *tc, struct ip *ip,
 		assert(tc->tc_retransmit);
 
 		/* XXX */
-		tcp = (struct tcphdr*) &tc->tc_retransmit->r_packet[20];
-		assert(find_subopt(tcp, TCOP_INIT2));
+		ip  = (struct ip*) tc->tc_retransmit->r_packet;
+		tcp = (struct tcphdr*) (ip + 1);
+		assert(is_init(ip, tcp, TC_INIT2));
 
 		return DIVERT_DROP;
 	} else {
@@ -1243,118 +1259,14 @@ static int do_output_init2_sent(struct tc *tc, struct ip *ip,
 	return DIVERT_ACCEPT;
 }
 
-static void compute_mac_opts(struct tc *tc, struct tcphdr *tcp,
-			     struct iovec *iov, int *nump)
-{
-	int optlen, ol, optlen2;
-	uint8_t *p = (uint8_t*) (tcp + 1);
-	int num = *nump;
-
-	optlen2 = optlen = (tcp->th_off << 2) - sizeof(*tcp);
-	assert(optlen >= 0);
-
-	if (optlen == tc->tc_mac_opt_cache[tc->tc_dir_packet])
-		return;
-
-	iov[num].iov_base = NULL;
-
-	while (optlen > 0) {
-		ol = 0;
-
-		switch (*p) {
-		case TCPOPT_EOL:
-		case TCPOPT_NOP:
-			ol = 1;
-			ol = 1;
-			break;
-
-		default:
-			if (optlen < 2) {
-				xprintf(XP_ALWAYS, "death\n");
-				abort();
-			}
-
-			ol = *(p + 1);
-			if (ol > optlen) {
-				xprintf(XP_ALWAYS, "fuck off\n");
-				abort();
-			}
-		}
-
-		switch (*p) {
-		case TCPOPT_TIMESTAMP:
-		case TCPOPT_SKEETER:
-		case TCPOPT_BUBBA:
-		case TCPOPT_MD5:
-		case TCPOPT_MAC:
-		case TCPOPT_EOL:
-		case TCPOPT_NOP:
-			if (iov[num].iov_base) {
-				num++;
-				iov[num].iov_base = NULL;
-			}
-			break;
-
-		default:
-			if (!iov[num].iov_base) {
-				iov[num].iov_base = p;
-				iov[num].iov_len  = 0;
-			}
-			iov[num].iov_len += ol;
-			break;
-		}
-
-		optlen -= ol;
-		p += ol;
-	}
-
-	if (iov[num].iov_base)
-		num++;
-
-	if (*nump == num)
-		tc->tc_mac_opt_cache[tc->tc_dir_packet] = optlen2;
-
-	*nump = num;
-}
-
-static void compute_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
+static void compute_mac(struct tc *tc, void *data, int len,
 			void *iv, void *out, int dir_in)
 {
-	struct mac_m m;
 	struct iovec iov[32];
 	int num = 0;
-	struct mac_a a;
-	uint8_t *outp;
-	int maca_len = tc->tc_mac_size;
-	uint8_t *mac = alloca(maca_len);
 	int maclen;
-	uint32_t *p1, *p2;
-	uint64_t seq = tc->tc_seq + ntohl(tcp->th_seq);
-	uint64_t ack = tc->tc_ack + ntohl(tcp->th_ack);
 	struct crypt_sym *cs = dir_in ? tc->tc_key_active->tc_alg_rx
 				      : tc->tc_key_active->tc_alg_tx;
-
-	seq -= dir_in ? tc->tc_isn_peer : tc->tc_isn;
-	ack -= dir_in ? tc->tc_isn : tc->tc_isn_peer;
-
-	assert(mac);
-	p2 = (uint32_t*) mac;
-
-	/* M struct */
-	m.mm_magic = htons(MACM_MAGIC);
-	m.mm_len   = htons(ntohs(ip->ip_len) - (ip->ip_hl << 2));
-	m.mm_off   = tcp->th_off;
-	m.mm_flags = tcp->th_flags;
-	m.mm_urg   = tcp->th_urp;
-	m.mm_seqhi = htonl(seq >> 32);
-	m.mm_seq   = htonl(seq & 0xFFFFFFFF);
-
-	iov[num].iov_base   = &m;
-	iov[num++].iov_len  = sizeof(m);
-
-	/* options */
-	compute_mac_opts(tc, tcp, iov, &num);
-	assert(num < sizeof(iov) / sizeof(*iov));
 
 	/* IV */
 	if (tc->tc_mac_ivlen) {
@@ -1372,46 +1284,15 @@ static void compute_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 
 	/* payload */
 	assert(num < sizeof(iov) / sizeof(*iov));
-	iov[num].iov_len = tcp_data_len(ip, tcp);
+	iov[num].iov_len = len;
 	if (iov[num].iov_len)
-		iov[num++].iov_base = tcp_data(tcp);
+		iov[num++].iov_base = data;
 
 	maclen = tc->tc_mac_size;
 
-	profile_add(2, "compute_mac pre M");
+	profile_add(2, "compute_mac pre");
 	crypt_mac(cs->cs_mac, iov, num, out, &maclen);
-	profile_add(2, "compute_mac MACed M");
-
-	/* A struct */
-	a.ma_ackhi = htonl(ack >> 32);
-	a.ma_ack   = htonl(ack & 0xFFFFFFFF);
-
-	memset(mac, 0, maca_len);
-
-	iov[0].iov_base = &a;
-	iov[0].iov_len  = sizeof(a);
-
-	crypt_mac(cs->cs_ack_mac, iov, 1, mac, &maca_len);
-	assert(maca_len == tc->tc_mac_size);
-	profile_add(2, "compute_mac MACed A");
-
-	/* XOR the two */
-	p1     = (uint32_t*) out;
-	maclen = tc->tc_mac_size;
-
-	while (maclen >= 4) {
-		*p1++  ^= *p2++;
-		maclen -= 4;
-	}
-
-	if (maclen == 0)
-		return;
-
-	outp = (uint8_t*) p1;
-	mac  = (uint8_t*) p2;
-
-	while (maclen--) 
-		*outp++ ^= *mac++;
+	profile_add(2, "compute_mac MACed");
 }
 
 static void *get_iv(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
@@ -1455,20 +1336,51 @@ static void encrypt(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 		crypt_encrypt(c, iv, data, dlen);
 }
 
+static struct tc_record * record_alloc(struct tc *tc, struct ip *ip,
+				       struct tcphdr *tcp, int len, int type)
+{
+	int thlen   = tcp->th_off * 4;
+	int datalen = tcp_data_len(ip, tcp);
+	int totlen = (ip->ip_hl * 4) + thlen + len;
+	uint8_t *data = tcp_data(tcp);
+	struct tc_record *record = (struct tc_record*) data;
+
+	/* extend packet
+         * We assume we clamped the MSS
+         */
+	if (totlen >= 1500)
+		xprintf(XP_DEBUG, "Damn... sending large packet %d\n", totlen);
+
+	set_ip_len(ip, totlen);
+
+	/* move data forward */
+	memmove(record->tr_data, data, datalen);
+
+	record->tr_len = htons(len);
+	record->tr_type = htons(type);
+
+	return record;
+}
+
 static int add_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
-	struct tcpopt_mac *tom;
-	int len = sizeof(*tom) + tc->tc_mac_size + tc->tc_mac_ivlen;
+	struct tc_record *record;
+	int datalen = tcp_data_len(ip, tcp);
+	int maclen = tc->tc_mac_size + tc->tc_mac_ivlen;
+	int len = sizeof(*record) + datalen + maclen;
+	uint8_t *mac;
+
+	if (datalen == 0)
+		return 0;
 
 	/* add MAC option */
-	tom = tcp_opts_alloc(tc, ip, tcp, len);
-	if (!tom)
+	record = record_alloc(tc, ip, tcp, len, TCPOPT_MAC);
+	if (!record)
 		return -1;
 
-	tom->tom_kind = TCPOPT_MAC;
-	tom->tom_len  = len;
+	mac = (uint8_t*) record + len - maclen;
 
-	compute_mac(tc, ip, tcp, NULL, tom->tom_data, 0);
+	compute_mac(tc, record, len - maclen, NULL, mac, 0);
 
 	return 0;
 }
@@ -1808,7 +1720,7 @@ static int do_output(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 		break;
 
 	case STATE_INIT1_SENT:
-		if (!find_subopt(tcp, TCOP_INIT1))
+		if (!is_init(ip, tcp, TC_INIT1))
 			rc = do_output_pkconf_rcvd(tc, ip, tcp, 1);
 		break;
 
@@ -2211,7 +2123,6 @@ static void compute_ss(struct tc *tc)
 static int process_init1(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 			 uint8_t *kxs, int kxs_len)
 {
-	struct tc_subopt *tcs;
 	struct tc_init1 *i1;
 	int dlen;
 	uint8_t *nonce;
@@ -2223,21 +2134,11 @@ static int process_init1(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 	void *pms;
 	int pmsl;
 
-	tcs = find_subopt(tcp, TCOP_INIT1);
-	if (!tcs)
+	if (!is_init(ip, tcp, TC_INIT1))
 		return bad_packet("can't find init1");
 
 	dlen = tcp_data_len(ip, tcp);
 	i1   = tcp_data(tcp);
-
-	if (dlen < sizeof(*i1))
-		return bad_packet("short init1");
-
-	if (ntohl(i1->i1_magic) != TC_INIT1)
-		return bad_packet("bad magic");
-
-	if (dlen != ntohl(i1->i1_len))
-		return bad_packet("bad init1 lenn");
 
 	if (!select_pkey(tc, &i1->i1_pub))
 		return bad_packet("init1: bad public key");
@@ -2324,7 +2225,6 @@ static int swallow_data(struct ip *ip, struct tcphdr *tcp)
 static int do_input_pkconf_sent(struct tc *tc, struct ip *ip,
 				struct tcphdr *tcp)
 {
-	struct tc_subopt *tcs;
 	int len, dlen;
 	void *buf;
 	struct ip *ip2;
@@ -2350,10 +2250,6 @@ static int do_input_pkconf_sent(struct tc *tc, struct ip *ip,
 	make_reply(buf, ip, tcp);
 	ip2 = (struct ip*) buf;
 	tcp2 = (struct tcphdr*) (ip2 + 1);
-
-	tcs = subopt_alloc(tc, ip2, tcp2, 1);
-	assert(tcs);
-	tcs->tcs_op = TCOP_INIT2;
 
 	len = sizeof(*i2) + cipherlen;
 	i2  = data_alloc(tc, ip2, tcp2, len, 0);
@@ -2437,31 +2333,20 @@ static int select_sym(struct tc *tc, struct tc_scipher *s)
 
 static int process_init2(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
-	struct tc_subopt *tcs;
 	struct tc_init2 *i2;
 	int len;
 	int nlen;
 	void *nonce;
 
-	tcs = find_subopt(tcp, TCOP_INIT2);
-	if (!tcs)
+	if (!is_init(ip, tcp, TC_INIT2))
 		return bad_packet("init2: can't find opt");
 
 	i2  = tcp_data(tcp);
 	len = tcp_data_len(ip, tcp);
 
-	if (len < sizeof(*i2))
-		return bad_packet("init2: short packet");
-
-	if (len != ntohl(i2->i2_len))
-		return bad_packet("init2: bad lenn");
-
 	nlen = len - sizeof(*i2);
 	if (nlen <= 0)
 		return bad_packet("init2: bad len");
-
-	if (ntohl(i2->i2_magic) != TC_INIT2)
-		return bad_packet("init2: bad magic");
 
 	if (!select_sym(tc, &i2->i2_scipher))
 		return bad_packet("init2: select_sym()");
@@ -2531,24 +2416,50 @@ static int do_input_init1_sent(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 
 static int check_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
-	struct tcpopt_mac *tom;
-	void *mac = alloca(tc->tc_mac_size);
+	int macsize = tc->tc_mac_size + tc->tc_mac_ivlen;
+	int len = tcp_data_len(ip, tcp);
+	int dlen;
+	struct tc_record *record = tcp_data(tcp);
+	uint8_t *mac, *computed_mac;
 
-	assert(mac);
+	if (len == 0)
+		return 0;
 
-	tom = find_opt(tcp, TCPOPT_MAC);
-	if (!tom) {
-		if (!tc->tc_mac_rst && (tcp->th_flags & TH_RST))
-			return 0;
-
+	/* sanity check record */
+	if (len < sizeof(*record))
 		return -1;
-	}
 
-	compute_mac(tc, ip, tcp, tc->tc_mac_ivlen ? tom->tom_data : NULL,
-		    mac, 1);
+	if (len != ntohs(record->tr_len))
+		return -1;
 
-	if (memcmp(&tom->tom_data[tc->tc_mac_ivlen], mac, tc->tc_mac_size) != 0)
+	if (ntohs(record->tr_type) != TCPOPT_MAC)
+		return -1;
+
+	dlen = len - sizeof(*record);
+
+	if (dlen < macsize)
+		return -1;
+
+	dlen -= macsize;
+
+	assert(dlen > 0);
+
+	mac = record->tr_data + dlen;
+
+	computed_mac = alloca(tc->tc_mac_size);
+
+	assert(computed_mac);
+
+	/* check mac */
+	compute_mac(tc, record, len - macsize, tc->tc_mac_ivlen ? mac : NULL,
+		    computed_mac, 1);
+
+	if (memcmp(&mac[tc->tc_mac_ivlen], computed_mac, tc->tc_mac_size) != 0)
 		return -2;
+
+	/* remove record & MAC */
+	memmove(record, record->tr_data, dlen);
+	set_ip_len(ip, (ip->ip_hl * 4) + (tcp->th_off * 4) + dlen);
 
 	return 0;
 }
@@ -2654,7 +2565,7 @@ static int do_input_encrypting(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 				return DIVERT_ACCEPT;
 
 			/* pkey */
-			else if (find_subopt(tcp, TCOP_INIT2)) {
+			else if (is_init(ip, tcp, TC_INIT2)) {
 				ack(tc, ip, tcp);
 				return DIVERT_DROP;
 			}
@@ -2694,7 +2605,7 @@ static int do_input_init2_sent(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	int rc;
 
 	if (tc->tc_retransmit) {
-		assert(find_subopt(tcp, TCOP_INIT1));
+		assert(is_init(ip, tcp, TC_INIT1));
 		return DIVERT_DROP;
 	}
 

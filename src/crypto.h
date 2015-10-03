@@ -9,7 +9,7 @@ enum {
 };
 
 struct cipher_list {
-	unsigned int		c_id;
+	uint8_t			c_id;
 	int			c_type;
 	crypt_ctr		c_ctr;
 	struct cipher_list	*c_next;
@@ -43,7 +43,7 @@ extern struct crypt *crypt_ECDHE256_new(void);
 extern struct crypt *crypt_ECDHE521_new(void);
 
 extern struct crypt *crypt_init(int sz);
-extern void crypt_register(int type, unsigned int id, crypt_ctr ctr);
+extern void crypt_register(int type, uint8_t id, crypt_ctr ctr);
 extern struct cipher_list *crypt_find_cipher(int type, unsigned int id);
 
 static inline void crypt_destroy(struct crypt *c)

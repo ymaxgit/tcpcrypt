@@ -45,7 +45,7 @@ static struct crypt_pub *ECDHE_HKDF_new(struct crypt*(*ctr)(void), int klen)
 	cp->cp_n_s           = 32;
 	cp->cp_k_len         = 32;
 	cp->cp_max_key       = (4096 / 8);
-	cp->cp_cipher_len    = 1 + cp->cp_n_s + klen;
+	cp->cp_cipher_len    = cp->cp_n_s + klen;
 	cp->cp_key_agreement = 1;
 
 	return cp;
@@ -75,12 +75,12 @@ static struct crypt_sym *AES_HMAC_new(void)
 	return cs;
 }
 
-static void register_pub(unsigned int id, struct crypt_pub *(*ctr)(void))
+static void register_pub(uint8_t id, struct crypt_pub *(*ctr)(void))
 {
 	crypt_register(TYPE_PKEY, id, (crypt_ctr) ctr);
 }
 
-static void register_sym(unsigned int id, struct crypt_sym *(*ctr)(void))
+static void register_sym(uint8_t id, struct crypt_sym *(*ctr)(void))
 {
 	crypt_register(TYPE_SYM, id, (crypt_ctr) ctr);
 }
@@ -89,7 +89,6 @@ static void __register_ciphers(void) __attribute__ ((constructor));
 
 static void __register_ciphers(void)
 {
-	register_pub(TC_CIPHER_OAEP_RSA_3, RSA_HKDF_new);
 	register_pub(TC_CIPHER_ECDHE_P256, ECDHE256_HKDF_new);
 	register_pub(TC_CIPHER_ECDHE_P521, ECDHE521_HKDF_new);
 

@@ -81,10 +81,7 @@ static int ecdhe_encrypt(struct crypt *c, void *iv, void *data, int len)
 	struct ecdhe_priv *tp = crypt_priv(c);
 	unsigned char *p = data;
 
-	memmove(data + 1, data, len);
-	*p = (uint8_t) len;
-
-	p += 1 + len;
+	p += len;
 
 	memcpy(p, tp->ec_bin, tp->ec_bin_len);
 
@@ -98,9 +95,6 @@ static int ecdhe_decrypt(struct crypt *c, void *iv, void *data, int len)
 {
 	unsigned char *p = data;
 	int nonce_len = 32;
-
-	if (*p++ != nonce_len)
-		return -1;
 
 	p += nonce_len;
 

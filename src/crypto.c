@@ -33,7 +33,7 @@ struct crypt *crypt_init(int sz)
 	return c;
 }
 
-void crypt_register(int type, unsigned int id, crypt_ctr ctr)
+void crypt_register(int type, uint8_t id, crypt_ctr ctr)
 {
 	struct cipher_list *c = xmalloc(sizeof(*c));
 

@@ -55,7 +55,7 @@ static int			_pkey_len;
 static struct tc_scipher	_sym[MAX_CIPHERS];
 static int			_sym_len;
 
-typedef int (*opt_cb)(struct tc *tc, int tcpop, int subop, int len, void *data);
+typedef int (*opt_cb)(struct tc *tc, int tcpop, int len, void *data);
 
 static void *get_free(struct freelist *f, unsigned int sz)
 {
@@ -284,6 +284,7 @@ static void session_cache(struct tc *tc)
 		s->ts_role 	 = tc->tc_role;
 		s->ts_ip   	 = tc->tc_dst_ip;
 		s->ts_port 	 = tc->tc_dst_port;
+		s->ts_pub_spec   = tc->tc_cipher_pkey.tcs_algo;
 		s->ts_pub	 = crypt_new(tc->tc_crypt_pub->cp_ctr);
 		s->ts_sym	 = crypt_new(tc->tc_crypt_sym->cs_ctr);
 	}
@@ -710,63 +711,6 @@ static void *find_opt(struct tcphdr *tcp, unsigned char opt)
 	return NULL;
 }
 
-static struct tc_subopt *find_subopt(struct tcphdr *tcp, unsigned char op)
-{
-	struct tcpopt_crypt *toc;
-	struct tc_subopt *tcs;
-	int len;
-	int optlen;
-
-	toc = find_opt(tcp, TCPOPT_CRYPT);
-	if (!toc)
-		return NULL;
-
-	len = toc->toc_len - sizeof(*toc);
-	assert(len >= 0);
-
-	if (len == 0 && op == TCOP_HELLO)
-		return (struct tc_subopt*) 0xbad;
-
-	tcs = &toc->toc_opts[0];
-	while (len > 0) {
-		if (len < 1)
-			return NULL;
-
-		if (tcs->tcs_op <= 0x3f)
-			optlen = 1;
-		else if (tcs->tcs_op >= 0x80) {
-			switch (tcs->tcs_op) {
-			case TCOP_NEXTK1:
-			case TCOP_NEXTK1_SUPPORT:
-				optlen = 10;
-				break;
-
-			case TCOP_REKEY:
-				/* XXX depends on cipher */
-				optlen = sizeof(struct tco_rekeystream);
-				break;
-
-			default:
-				errx(1, "Unknown option %d", tcs->tcs_op);
-				break;
-			}
-		} else
-			optlen = tcs->tcs_len;
-
-		if (optlen > len)
-			return NULL;
-
-		if (tcs->tcs_op == op)
-			return tcs;
-
-		len -= optlen;
-		tcs = (struct tc_subopt*) ((unsigned long) tcs + optlen);
-	}
-	assert(len == 0);
-
-	return NULL;
-}
-
 static void checksum_packet(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
 	checksum_ip(ip);
@@ -787,67 +731,6 @@ static void set_ip_len(struct ip *ip, unsigned short len)
 	sum	   = (sum >> 16) + (sum & 0xffff);
 	sum	  += (sum >> 16);
 	ip->ip_sum = htons(~sum);
-}
-
-static int foreach_subopt(struct tc *tc, int len, void *data, opt_cb cb)
-{
-	struct tc_subopt *tcs = (struct tc_subopt*) data;
-	int optlen = 0;
-	unsigned char *d;
-
-	assert(len >= 0);
-
-	if (len == 0)
-		return cb(tc, -1, TCOP_HELLO, optlen, tcs);
-
-	while (len > 0) {
-		d = (unsigned char *) tcs;
-
-		if (len < 1)
-			goto __bad;
-
-		if (tcs->tcs_op <= 0x3f)
-			optlen = 1;
-		else if (tcs->tcs_op >= 0x80) {
-			d++;
-			switch (tcs->tcs_op) {
-			case TCOP_NEXTK1:
-			case TCOP_NEXTK1_SUPPORT:
-				optlen = 10;
-				break;
-
-			case TCOP_REKEY:
-				/* XXX depends on cipher */
-				optlen = sizeof(struct tco_rekeystream);
-				break;
-
-			default:
-				errx(1, "Unknown option %d", tcs->tcs_op);
-				break;
-			}
-		} else {
-			if (len < 2)
-				goto __bad;
-			optlen = tcs->tcs_len;
-			d = tcs->tcs_data;
-		}
-
-		if (optlen > len)
-			goto __bad;
-
-		if (cb(tc, -1, tcs->tcs_op, optlen, d))
-			return 1;
-
-		len -= optlen;
-		tcs  = (struct tc_subopt*) ((unsigned long) tcs + optlen);
-	}
-
-	assert(len == 0);
-
-	return 0;
-__bad:
-	xprintf(XP_ALWAYS, "bad\n");
-	return 1;
 }
 
 static void foreach_opt(struct tc *tc, struct tcphdr *tcp, opt_cb cb)
@@ -884,13 +767,8 @@ static void foreach_opt(struct tc *tc, struct tcphdr *tcp, opt_cb cb)
 			break;
 		}
 
-		if (o == TCPOPT_CRYPT) {
-			if (foreach_subopt(tc, l, p, cb))
-				return;
-		} else {
-			if (cb(tc, o, -1, l, p))
-				return;
-		}
+		if (cb(tc, o, l, p))
+			return;
 
 		p   += l;
 		len -= l;
@@ -898,7 +776,7 @@ static void foreach_opt(struct tc *tc, struct tcphdr *tcp, opt_cb cb)
 	assert(len == 0);
 }
 
-static int do_ops_len(struct tc *tc, int tcpop, int subop, int len, void *data)
+static int do_ops_len(struct tc *tc, int tcpop, int len, void *data)
 {
 	tc->tc_optlen += len + 2;
 
@@ -967,22 +845,6 @@ static void *tcp_opts_alloc(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 	return p;
 }
 
-static struct tc_subopt *subopt_alloc(struct tc *tc, struct ip *ip,
-				      struct tcphdr *tcp, int len)
-{
-	struct tcpopt_crypt *toc;
-
-	len += sizeof(*toc);
-	toc = tcp_opts_alloc(tc, ip, tcp, len);
-	if (!toc)
-		return NULL;
-
-	toc->toc_kind = TCPOPT_CRYPT;
-	toc->toc_len  = len;
-
-	return toc->toc_opts;
-}
-
 static struct tc_sess *session_find_host(struct tc *tc, struct in_addr *in,
 					 int port)
 {
@@ -1001,9 +863,47 @@ static struct tc_sess *session_find_host(struct tc *tc, struct in_addr *in,
 	return NULL;
 }
 
+static int do_set_eno_transcript(struct tc *tc, int tcpop, int len, void *data)
+{
+	uint8_t *p = &tc->tc_eno[tc->tc_eno_len];
+
+	if (tcpop != TCPOPT_ENO)
+		return 0;
+
+	assert(len + 2 + tc->tc_eno_len < sizeof(tc->tc_eno));
+
+	*p++ = TCPOPT_ENO;
+	*p++ = len + 2;
+
+	memcpy(p, data, len);
+
+	tc->tc_eno_len += 2 + len;
+
+	return 0;
+}
+
+static void set_eno_transcript(struct tc *tc, struct tcphdr *tcp)
+{
+	unsigned char *p;
+
+	foreach_opt(tc, tcp, do_set_eno_transcript);
+
+	assert(tc->tc_eno_len + 2 < sizeof(tc->tc_eno));
+
+	p = &tc->tc_eno[tc->tc_eno_len];
+	*p++ = TCPOPT_ENO;
+	*p++ = 2;
+
+	tc->tc_eno_len += 2;
+}
+
 static int do_output_closed(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
 	struct tc_sess *ts = tc->tc_sess;
+	struct tcpopt_eno *eno;
+	struct tc_sess_opt *sopt;
+	int len;
+	uint8_t *p;
 
 	tc->tc_dir = DIR_OUT;
 
@@ -1013,50 +913,48 @@ static int do_output_closed(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	if (!ts && !tc->tc_nocache)
 		ts = session_find_host(tc, &ip->ip_dst, tcp->th_dport);
 
+	len = sizeof(*eno) + tc->tc_ciphers_pkey_len;
+
+	if (tc->tc_app_support)
+		len += 1;
+
+	if (ts)
+		len += sizeof(*sopt);
+
+	eno = tcp_opts_alloc(tc, ip, tcp, len);
+	if (!eno) {
+		xprintf(XP_ALWAYS, "No space for hello\n");
+		tc->tc_state = STATE_DISABLED;
+
+		/* XXX try without session resumption */
+
+		return DIVERT_ACCEPT;
+	}
+
+	eno->toe_kind = TCPOPT_ENO;
+	eno->toe_len  = len;
+
+	memcpy(eno->toe_opts, tc->tc_ciphers_pkey, tc->tc_ciphers_pkey_len);
+
+	p = eno->toe_opts + tc->tc_ciphers_pkey_len;
+
+	if (tc->tc_app_support)
+		*p++ = tc->tc_app_support << 1;
+
+	tc->tc_state = STATE_HELLO_SENT;
+
 	if (!ts) {
-		struct tcpopt_crypt *toc;
-		int len = sizeof(*toc);
-
-		if (tc->tc_app_support)
-			len++;
-
-		toc = tcp_opts_alloc(tc, ip, tcp, len);
-		if (!toc) {
-			xprintf(XP_ALWAYS, "No space for hello\n");
-			tc->tc_state = STATE_DISABLED;
-
-			return DIVERT_ACCEPT;
-		}
-
-		toc->toc_kind = TCPOPT_CRYPT;
-		toc->toc_len  = len;
-
-		if (tc->tc_app_support)
-			toc->toc_opts[0].tcs_op = TCOP_HELLO_SUPPORT;
-
-		tc->tc_state = STATE_HELLO_SENT;
-
 		if (!_conf.cf_nocache)
 			xprintf(XP_DEBUG, "Can't find session for host\n");
 	} else {
 		/* session caching */
-		struct tc_subopt *tcs;
-		int len = 1 + sizeof(struct tc_sid);
+		sopt = (struct tc_sess_opt*) p;
 
-		tcs = subopt_alloc(tc, ip, tcp, len);
-		if (!tcs) {
-			xprintf(XP_ALWAYS, "No space for NEXTK1\n");
-			tc->tc_state = STATE_DISABLED;
+		sopt->ts_opt = TC_RESUME | TC_OPT_VLEN;
+		sopt->ts_subopt = ts->ts_pub_spec;
 
-			return DIVERT_ACCEPT;
-		}
-
-		tcs->tcs_op = tc->tc_app_support ? TCOP_NEXTK1_SUPPORT
-						 : TCOP_NEXTK1;
-
-		assert(ts->ts_sid.s_len >= sizeof(struct tc_sid));
-		memcpy(&tcs->tcs_len, &ts->ts_sid.s_data,
-		       sizeof(struct tc_sid));
+		assert(ts->ts_sid.s_len >= sizeof(sopt->ts_sid));
+		memcpy(&sopt->ts_sid, &ts->ts_sid.s_data, sizeof(sopt->ts_sid));
 
 		tc->tc_state = STATE_NEXTK1_SENT;
 		assert(!ts->ts_used || ts == tc->tc_sess);
@@ -1064,50 +962,43 @@ static int do_output_closed(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 		ts->ts_used  = 1;
 	}
 
+	tc->tc_eno_len = 0;
+	set_eno_transcript(tc, tcp);
+
 	return DIVERT_MODIFY;
 }
 
 static int do_output_hello_rcvd(struct tc *tc, struct ip *ip,
 				struct tcphdr *tcp)
 {
-	struct tc_subopt *tcs;
+	struct tcpopt_eno *eno;
 	int len;
+	int app_support = tc->tc_app_support & 1;
 
-	if (tc->tc_cmode == CMODE_ALWAYS) {
-		tcs = subopt_alloc(tc, ip, tcp, 1);
-		if (!tcs) {
-			xprintf(XP_ALWAYS, "No space for HELLO\n");
-			tc->tc_state = STATE_DISABLED;
+	len = sizeof(*eno) + sizeof(tc->tc_cipher_pkey);
 
-			return DIVERT_ACCEPT;
-		}
+	if (app_support)
+		len++;
 
-		tcs->tcs_op = TCOP_HELLO;
-
-		tc->tc_state = STATE_HELLO_SENT;
-
-		return DIVERT_MODIFY;
-	}
-
-	len = sizeof(*tcs) + tc->tc_ciphers_pkey_len;
-	tcs = subopt_alloc(tc, ip, tcp, len);
-	if (!tcs) {
-		xprintf(XP_ALWAYS, "No space for PKCONF\n");
+	eno = tcp_opts_alloc(tc, ip, tcp, len);
+	if (!eno) {
+		xprintf(XP_ALWAYS, "No space for ENO\n");
 		tc->tc_state = STATE_DISABLED;
+
 		return DIVERT_ACCEPT;
 	}
 
-	tcs->tcs_op  = (tc->tc_app_support & 1) ? TCOP_PKCONF_SUPPORT
-						: TCOP_PKCONF;
-	tcs->tcs_len = len;
+	eno->toe_kind = TCPOPT_ENO;
+	eno->toe_len  = len;
 
-	memcpy(tcs->tcs_data, tc->tc_ciphers_pkey, tc->tc_ciphers_pkey_len);
+	memcpy(eno->toe_opts, &tc->tc_cipher_pkey, sizeof(tc->tc_cipher_pkey));
 
-	memcpy(tc->tc_pub_cipher_list, tc->tc_ciphers_pkey,
-	       tc->tc_ciphers_pkey_len);
-	tc->tc_pub_cipher_list_len = tc->tc_ciphers_pkey_len;
+	if (app_support)
+		eno->toe_opts[sizeof(tc->tc_cipher_pkey)] = app_support << 1;
 
 	tc->tc_state = STATE_PKCONF_SENT;
+
+	set_eno_transcript(tc, tcp);
 
 	return DIVERT_MODIFY;
 }
@@ -1166,30 +1057,26 @@ static int do_output_pkconf_rcvd(struct tc *tc, struct ip *ip,
 
 	klen = crypt_get_key(tc->tc_crypt_pub->cp_pub, &key);
 	len  = sizeof(*init1) 
-	       + tc->tc_ciphers_sym_len 
 	       + tc->tc_nonce_len
-	       + klen;
+	       + klen
+	       + 1
+	       + tc->tc_ciphers_sym_len;
 
 	init1 = data_alloc(tc, ip, tcp, len, retx);
 
-	init1->i1_magic       = htonl(TC_INIT1);
-	init1->i1_len	      = htonl(len);
-	init1->i1_pub	      = tc->tc_cipher_pkey;
-	init1->i1_num_ciphers = htons(tc->tc_ciphers_sym_len /
-				      sizeof(*tc->tc_ciphers_sym));
-
-	p = (uint8_t*) init1->i1_ciphers;
-	memcpy(p, tc->tc_ciphers_sym, tc->tc_ciphers_sym_len);
-	p += tc->tc_ciphers_sym_len;
-
-	memcpy(tc->tc_sym_cipher_list, tc->tc_ciphers_sym,
-	       tc->tc_ciphers_sym_len);
-	tc->tc_sym_cipher_list_len = tc->tc_ciphers_sym_len;
+	init1->i1_magic = htonl(TC_INIT1);
+	p = init1->i1_data;
 
 	memcpy(p, tc->tc_nonce, tc->tc_nonce_len);
 	p += tc->tc_nonce_len;
 
 	memcpy(p, key, klen);
+	p += klen;
+
+	*p++ = tc->tc_ciphers_sym_len;
+
+	memcpy(p, tc->tc_ciphers_sym, tc->tc_ciphers_sym_len);
+	p += tc->tc_ciphers_sym_len;
 
 	tc->tc_state = STATE_INIT1_SENT;
 	tc->tc_role  = ROLE_CLIENT;
@@ -1210,19 +1097,13 @@ static int do_output_init1_rcvd(struct tc *tc, struct ip *ip,
 
 static int is_init(struct ip *ip, struct tcphdr *tcp, int init)
 {
-	struct tc_init2 *i2 = tcp_data(tcp);
+	struct tc_init1 *i1 = tcp_data(tcp);
 	int dlen = tcp_data_len(ip, tcp);
 
-	if (dlen < sizeof(*i2))
+	if (dlen < sizeof(*i1))
 		return 0;
 
-	if (ntohl(i2->i2_magic) != init)
-		return 0;
-
-	if (dlen != ntohl(i2->i2_len))
-		return 0;
-
-	if (init == TC_INIT1 && dlen < sizeof(struct tc_init1))
+	if (ntohl(i1->i1_magic) != init)
 		return 0;
 
 	return 1;
@@ -1323,64 +1204,82 @@ static void *get_iv(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	return iv;
 }
 
-static void encrypt(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+static int add_data(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
+		    int head, int tail)
+{
+	int thlen   = tcp->th_off * 4;
+	int datalen = tcp_data_len(ip, tcp);
+	int totlen = (ip->ip_hl * 4) + thlen + head + datalen + tail;
+	uint8_t *data = tcp_data(tcp);
+
+	/* extend packet
+         * We assume we clamped the MSS
+         */
+	if (totlen >= 1500) {
+		xprintf(XP_DEBUG, "Damn... sending large packet %d\n", totlen);
+		return -1;
+	}
+
+	set_ip_len(ip, totlen);
+
+	/* move data forward */
+	memmove(data + head, data, datalen);
+
+	return 0;
+}
+
+static int encrypt_and_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
 	uint8_t *data = tcp_data(tcp);
 	int dlen = tcp_data_len(ip, tcp);
 	void *iv = NULL;
 	struct crypt *c = tc->tc_key_active->tc_alg_tx->cs_cipher;
+	int head;
+	struct tc_record *record;
+	int maclen = tc->tc_mac_size + tc->tc_mac_ivlen;
+	struct tc_flags *flags;
+	uint8_t *mac;
 
 	iv = get_iv(tc, ip, tcp);
 
-	if (dlen)
-		crypt_encrypt(c, iv, data, dlen);
-}
-
-static struct tc_record * record_alloc(struct tc *tc, struct ip *ip,
-				       struct tcphdr *tcp, int len, int type)
-{
-	int thlen   = tcp->th_off * 4;
-	int datalen = tcp_data_len(ip, tcp);
-	int totlen = (ip->ip_hl * 4) + thlen + len;
-	uint8_t *data = tcp_data(tcp);
-	struct tc_record *record = (struct tc_record*) data;
-
-	/* extend packet
-         * We assume we clamped the MSS
-         */
-	if (totlen >= 1500)
-		xprintf(XP_DEBUG, "Damn... sending large packet %d\n", totlen);
-
-	set_ip_len(ip, totlen);
-
-	/* move data forward */
-	memmove(record->tr_data, data, datalen);
-
-	record->tr_len = htons(len);
-	record->tr_type = htons(type);
-
-	return record;
-}
-
-static int add_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
-{
-	struct tc_record *record;
-	int datalen = tcp_data_len(ip, tcp);
-	int maclen = tc->tc_mac_size + tc->tc_mac_ivlen;
-	int len = sizeof(*record) + datalen + maclen;
-	uint8_t *mac;
-
-	if (datalen == 0)
+	if (!dlen)
 		return 0;
 
-	/* add MAC option */
-	record = record_alloc(tc, ip, tcp, len, TCPOPT_MAC);
-	if (!record)
+	/* TLV + flags */
+	head = sizeof(*record) + 1;
+
+	if (tcp->th_flags & TH_URG)
+		head += 2;
+
+	if (add_data(tc, ip, tcp, head, maclen))
 		return -1;
 
-	mac = (uint8_t*) record + len - maclen;
+	/* Prepare TLV */
+	record = tcp_data(tcp);
+	record->tr_control = 0;
+	record->tr_len     = htons(tcp_data_len(ip, tcp) - sizeof(*record));
 
-	compute_mac(tc, record, len - maclen, NULL, mac, 0);
+	/* Prepare flags */
+	flags = (struct tc_flags *) record->tr_data;
+	flags->tf_flags = 0;
+	flags->tf_flags |= (tcp->th_flags & TH_FIN ? 1 : 0) << 0;
+	flags->tf_flags |= (tcp->th_flags & TH_RST ? 1 : 0) << 1;
+	flags->tf_flags |= (tcp->th_flags & TH_URG ? 1 : 0) << 2;
+
+	if (tcp->th_flags & TH_URG)
+		flags->tf_urp[0] = tcp->th_urp;
+
+	crypt_encrypt(c, iv, data + sizeof(*record),
+		      dlen + head - sizeof(*record));
+
+	profile_add(1, "do_output post sym encrypt");
+
+	mac = data + tcp_data_len(ip, tcp) - maclen;
+
+	compute_mac(tc, record, (unsigned long) mac - (unsigned long) record,
+		    NULL, mac, 0);
+
+	profile_add(1, "post add mac");
 
 	return 0;
 }
@@ -1408,7 +1307,7 @@ static int connected(struct tc *tc)
 	       || tc->tc_state == STATE_REKEY_RCVD;
 }
 
-static int do_compress(struct tc *tc, int tcpop, int subop, int len, void *data)
+static int do_compress(struct tc *tc, int tcpop, int len, void *data)
 {
 	uint8_t *p = data;
 
@@ -1539,7 +1438,8 @@ static void rekey_output(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	/* send rekeys */
 	compress_options(tc, ip, tcp);
 
-	tr = (struct tco_rekeystream*) subopt_alloc(tc, ip, tcp, sizeof(*tr));
+	/* XXX TODO */
+	tr = NULL;
 	assert(tr);
 
 	tr->tr_op  	  = TCOP_REKEY;
@@ -1566,16 +1466,12 @@ static int do_output_encrypting(struct tc *tc, struct ip *ip,
 	rekey_output(tc, ip, tcp);
 
 	profile_add(1, "do_output pre sym encrypt");
-	encrypt(tc, ip, tcp);
-	profile_add(1, "do_output post sym encrypt");
-
-	if (add_mac(tc, ip, tcp)) { 
+	if (encrypt_and_mac(tc, ip, tcp)) {
 		/* hopefully pmtu disc works */
 		xprintf(XP_ALWAYS, "No space for MAC - dropping\n");
 
 		return DIVERT_DROP;
 	}
-	profile_add(1, "post add mac");
 
 	/* XXX retransmissions.  approx. */
 	tc->tc_sent_bytes += tcp_data_len(ip, tcp);
@@ -1656,20 +1552,30 @@ static int do_tcp_output(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 static int do_output_nextk1_rcvd(struct tc *tc, struct ip *ip,
 				 struct tcphdr *tcp)
 {
-	struct tc_subopt *tcs;
+	struct tcpopt_eno *eno;
+	int len;
 
 	if (!tc->tc_sess)
 		return do_output_hello_rcvd(tc, ip, tcp);
 
-	tcs = subopt_alloc(tc, ip, tcp, 1);
-	if (!tcs) {
+	len = sizeof(*eno) + 1;
+
+	if (tc->tc_app_support)
+		len += 1;
+
+	eno = tcp_opts_alloc(tc, ip, tcp, len);
+	if (!eno) {
 		xprintf(XP_ALWAYS, "No space for NEXTK2\n");
 		tc->tc_state = STATE_DISABLED;
 		return DIVERT_ACCEPT;
 	}
 
-	tcs->tcs_op = (tc->tc_app_support & 1) ? TCOP_NEXTK2_SUPPORT
-					       : TCOP_NEXTK2;
+	eno->toe_kind    = TCPOPT_ENO;
+	eno->toe_len     = len;
+	eno->toe_opts[0] = TC_RESUME;
+
+	if (tc->tc_app_support)
+		eno->toe_opts[1] = tc->tc_app_support << 1;
 
 	tc->tc_state = STATE_NEXTK2_SENT;
 
@@ -1778,32 +1684,133 @@ static int do_clamp_mss(struct tc *tc, uint16_t *mss)
 	return DIVERT_MODIFY;
 }
 
-static int opt_input_closed(struct tc *tc, int tcpop, int subop, int len,
-			    void *data)
+static int negotiate_cipher(struct tc *tc, struct tc_cipher_spec *a, int an)
+{
+	struct tc_cipher_spec *b = tc->tc_ciphers_pkey;
+	int bn = tc->tc_ciphers_pkey_len / sizeof(*tc->tc_ciphers_pkey);
+	struct tc_cipher_spec *out = &tc->tc_cipher_pkey;
+
+	tc->tc_pub_cipher_list_len = an * sizeof(*a);
+	memcpy(tc->tc_pub_cipher_list, a, tc->tc_pub_cipher_list_len);
+
+	while (an--) {
+		while (bn--) {
+			if (a->tcs_algo == b->tcs_algo) {
+				out->tcs_algo = a->tcs_algo;
+				return 1;
+			}
+
+			b++;
+		}
+
+		a++;
+	}
+
+	return 0;
+}
+
+static void init_pkey(struct tc *tc)
+{
+	struct ciphers *c = _ciphers_pkey.c_next;
+	struct tc_cipher_spec *s;
+
+	assert(tc->tc_cipher_pkey.tcs_algo);
+
+	while (c) {
+		s = (struct tc_cipher_spec*) c->c_spec;
+
+		if (s->tcs_algo == tc->tc_cipher_pkey.tcs_algo) {
+			tc->tc_crypt_pub = crypt_new(c->c_cipher->c_ctr);
+			return;
+		}
+
+		c = c->c_next;
+	}
+
+	assert(!"Can't init cipher");
+}
+
+static void check_app_support(struct tc *tc, uint8_t *data, int len)
+{
+	while (len--) {
+		/* general option */
+		if ((*data >> 4) == 0) {
+			/* application aware bit */
+			if (*data & 2)
+				tc->tc_app_support |= 2;
+		}
+
+		data++;
+	}
+}
+
+static int can_session_resume(struct tc *tc, uint8_t *data, int len)
+{
+	int i;
+	struct tc_sess_opt *sopt;
+
+	for (i = 0; i < len; i++) {
+		if (data[i] & TC_OPT_VLEN) {
+			if ((data[i] & ~TC_OPT_VLEN) != TC_RESUME)
+				return 0;
+
+			break;
+		}
+	}
+
+	if (i == len)
+		return 0;
+
+	sopt = (struct tc_sess_opt*) &data[i];
+	assert(sopt->ts_opt == (TC_RESUME | TC_OPT_VLEN));
+
+	if (sizeof(*sopt) != (len - i)) {
+		xprintf(XP_ALWAYS, "Bad NEXTK1\n");
+		return 0;
+	}
+
+	tc->tc_sess = session_find(tc, &sopt->ts_sid);
+	profile_add(2, "found session");
+
+	if (!tc->tc_sess)
+		return 0;
+
+	tc->tc_state = STATE_NEXTK1_RCVD;
+
+	return 1;
+}
+
+static void input_closed_eno(struct tc *tc, uint8_t *data, int len)
+{
+	struct tc_cipher_spec *cipher = (struct tc_cipher_spec*) data;
+
+	check_app_support(tc, data, len);
+
+	if (can_session_resume(tc, data, len))
+		return;
+
+	if (!negotiate_cipher(tc, cipher, len)) {
+		xprintf(XP_ALWAYS, "No cipher\n");
+		tc->tc_state = STATE_DISABLED;
+		return;
+	}
+
+	init_pkey(tc);
+
+	tc->tc_state = STATE_HELLO_RCVD;
+}
+
+static int opt_input_closed(struct tc *tc, int tcpop, int len, void *data)
 {
 	uint8_t *p;
 
 	profile_add(2, "opt_input_closed in");
 
-	switch (subop) {
-	case TCOP_HELLO_SUPPORT:
-		tc->tc_app_support |= 2;
-		/* fallthrough */
-	case TCOP_HELLO:
-		tc->tc_state = STATE_HELLO_RCVD;
-		break;
-
-	case TCOP_NEXTK1_SUPPORT:
-		tc->tc_app_support |= 2;
-		/* fallthrough */
-	case TCOP_NEXTK1:
-		tc->tc_state = STATE_NEXTK1_RCVD;
-		tc->tc_sess  = session_find(tc, data);
-		profile_add(2, "found session");
-		break;
-	}
-
 	switch (tcpop) {
+	case TCPOPT_ENO:
+		input_closed_eno(tc, data, len);
+		break;
+
 	case TCPOPT_SACK_PERMITTED:
 		p     = data;
 		p[-2] = TCPOPT_NOP;
@@ -1838,32 +1845,10 @@ static int do_input_closed(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	foreach_opt(tc, tcp, opt_input_closed);
 	profile_add(1, "do_input_closed options parsed");
 
+	tc->tc_eno_len = 0;
+	set_eno_transcript(tc, tcp);
+
 	return tc->tc_verdict;
-}
-
-static int negotiate_cipher(struct tc *tc, struct tc_cipher_spec *a, int an)
-{
-	struct tc_cipher_spec *b = tc->tc_ciphers_pkey;
-	int bn = tc->tc_ciphers_pkey_len / sizeof(*tc->tc_ciphers_pkey);
-	struct tc_cipher_spec *out = &tc->tc_cipher_pkey;
-
-	tc->tc_pub_cipher_list_len = an * sizeof(*a);
-	memcpy(tc->tc_pub_cipher_list, a, tc->tc_pub_cipher_list_len);
-
-	while (an--) {
-		while (bn--) {
-			if (a->tcs_algo == b->tcs_algo) {
-				out->tcs_algo    = a->tcs_algo;
-				return 1;
-			}
-
-			b++;
-		}
-
-		a++;
-	}
-
-	return 0;
 }
 
 static void make_reply(void *buf, struct ip *ip, struct tcphdr *tcp)
@@ -1915,89 +1900,39 @@ static void *alloc_retransmit(struct tc *tc)
 	return r->r_packet;
 }
 
-static void init_pkey(struct tc *tc)
-{
-	struct ciphers *c = _ciphers_pkey.c_next;
-	struct tc_cipher_spec *s;
-
-	assert(tc->tc_cipher_pkey.tcs_algo);
-
-	while (c) {
-		s = (struct tc_cipher_spec*) c->c_spec;
-
-		if (s->tcs_algo == tc->tc_cipher_pkey.tcs_algo) {
-			tc->tc_crypt_pub = crypt_new(c->c_cipher->c_ctr);
-			return;
-		}
-
-		c = c->c_next;
-	}
-
-	assert(!"Can't init cipher");
-}
-
 static int do_input_hello_sent(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
-	struct tc_subopt *tcs;
 	struct tc_cipher_spec *cipher;
+	struct tcpopt_eno *eno;
+	int len;
 
-	tcs = find_subopt(tcp, TCOP_HELLO);
-	if (tcs) {
-		if (tc->tc_cmode == CMODE_ALWAYS) {
-			tc->tc_state = STATE_DISABLED;
-
-			return DIVERT_ACCEPT;
-		}
-
-		tc->tc_state = STATE_HELLO_RCVD;
+	if (!(eno = find_opt(tcp, TCPOPT_ENO))) {
+		tc->tc_state = STATE_DISABLED;
 
 		return DIVERT_ACCEPT;
 	}
 
-	if ((tcs = find_subopt(tcp, TCOP_PKCONF_SUPPORT)))
-		tc->tc_app_support |= 2;
-	else {
-		tcs = find_subopt(tcp, TCOP_PKCONF);
-		if (!tcs) {
-			tc->tc_state = STATE_DISABLED;
+	len = eno->toe_len - 2;
+	assert(len >= 0);
 
-			return DIVERT_ACCEPT;
-		}
-	}
+	check_app_support(tc, eno->toe_opts, len);
 
-	assert((tcs->tcs_len - 2) % sizeof(*cipher) == 0);
-	cipher = (struct tc_cipher_spec*) tcs->tcs_data;
+	cipher = (struct tc_cipher_spec*) eno->toe_opts;
 
-	if (!negotiate_cipher(tc, cipher,
-			      (tcs->tcs_len - 2) / sizeof(*cipher))) {
+	/* XXX truncate len as it could go to the variable options (like SID) */
+
+	if (!negotiate_cipher(tc, cipher, len)) {
 		xprintf(XP_ALWAYS, "No cipher\n");
 		tc->tc_state = STATE_DISABLED;
 
 		return DIVERT_ACCEPT;
 	}
 
+	set_eno_transcript(tc, tcp);
+
 	init_pkey(tc);
 
 	tc->tc_state = STATE_PKCONF_RCVD;
-
-	/* we switched roles, we gotta inject the INIT1 */
-	if (tcp->th_flags != (TH_SYN | TH_ACK)) {
-		void *buf;
-		struct ip *ip2;
-		struct tcphdr *tcp2;
-
-		buf = alloc_retransmit(tc);
-		make_reply(buf, ip, tcp);
-
-		ip2 = (struct ip*) buf;
-		tcp2 = (struct tcphdr*) (ip2 + 1);
-		do_output_pkconf_rcvd(tc, ip2, tcp2, 0);
-
-		checksum_packet(tc, ip2, tcp2);
-		divert_inject(ip2, ntohs(ip2->ip_len));
-
-		tc->tc_state = STATE_INIT1_SENT;
-	}
 
 	return DIVERT_ACCEPT;
 }
@@ -2080,29 +2015,21 @@ static int select_pkey(struct tc *tc, struct tc_cipher_spec *pkey)
 
 static void compute_ss(struct tc *tc)
 {
-	struct iovec iov[5];
-	unsigned char num;
+	struct iovec iov[4];
 
 	profile_add(1, "compute ss in");
 
-	assert((tc->tc_pub_cipher_list_len % 3) == 0);
+	iov[0].iov_base = tc->tc_eno;
+	iov[0].iov_len  = tc->tc_eno_len;
 
-	num = tc->tc_pub_cipher_list_len / 3;
+	iov[1].iov_base = tc->tc_init1;
+	iov[1].iov_len  = tc->tc_init1_len;
 
-	iov[0].iov_base = &num;
-	iov[0].iov_len  = 1;
+	iov[2].iov_base = tc->tc_init2;
+	iov[2].iov_len  = tc->tc_init2_len;
 
-	iov[1].iov_base = tc->tc_pub_cipher_list;
-	iov[1].iov_len  = tc->tc_pub_cipher_list_len;
-
-	iov[2].iov_base = tc->tc_init1;
-	iov[2].iov_len  = tc->tc_init1_len;
-
-	iov[3].iov_base = tc->tc_init2;
-	iov[3].iov_len  = tc->tc_init2_len;
-
-	iov[4].iov_base = tc->tc_pms;
-	iov[4].iov_len  = tc->tc_pms_len;
+	iov[3].iov_base = tc->tc_pms;
+	iov[3].iov_len  = tc->tc_pms_len;
 
 	crypt_set_key(tc->tc_crypt_pub->cp_hkdf,
 		      tc->tc_nonce, tc->tc_nonce_len);
@@ -2133,6 +2060,8 @@ static int process_init1(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 	int cl;
 	void *pms;
 	int pmsl;
+	int len;
+	uint8_t *p;
 
 	if (!is_init(ip, tcp, TC_INIT1))
 		return bad_packet("can't find init1");
@@ -2140,30 +2069,30 @@ static int process_init1(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 	dlen = tcp_data_len(ip, tcp);
 	i1   = tcp_data(tcp);
 
-	if (!select_pkey(tc, &i1->i1_pub))
+	if (!select_pkey(tc, &tc->tc_cipher_pkey))
 		return bad_packet("init1: bad public key");
 
-	nonce_len   = tc->tc_crypt_pub->cp_n_c;
-	num_ciphers = ntohs(i1->i1_num_ciphers);
+	klen = crypt_get_key(tc->tc_crypt_pub->cp_pub, &key);
 
-	klen = dlen 
-	       - sizeof(*i1)
-	       - num_ciphers * sizeof(*i1->i1_ciphers)
-	       - nonce_len;
+	nonce_len = tc->tc_crypt_pub->cp_n_c;
 
-	if (klen <= 0)
+	p   = i1->i1_data + nonce_len + klen;
+	len = (unsigned long) p - (unsigned long) i1;
+
+	if (len >= dlen)
 	    	return bad_packet("bad init1 len");
+	
+	num_ciphers = *p++;
 
-	if (tc->tc_crypt_pub->cp_max_key && klen > tc->tc_crypt_pub->cp_max_key)
-		return bad_packet("init1: key length disagreement");
+	len += 1 + num_ciphers;
 
-	if (tc->tc_crypt_pub->cp_min_key && klen < tc->tc_crypt_pub->cp_min_key)
-		return bad_packet("init2: key length too short");
+	if (len != dlen)
+	    	return bad_packet("bad init1 lenn");
 
-	if (!negotiate_sym_cipher(tc, i1->i1_ciphers, num_ciphers))
+	if (!negotiate_sym_cipher(tc, (struct tc_scipher *) p, num_ciphers))
 		return bad_packet("init1: can't negotiate");
 
-	nonce = (uint8_t*) &i1->i1_ciphers[num_ciphers];
+	nonce = i1->i1_data;
 	key   = nonce + nonce_len;
 
 	profile_add(1, "pre pkey set key");
@@ -2251,14 +2180,13 @@ static int do_input_pkconf_sent(struct tc *tc, struct ip *ip,
 	ip2 = (struct ip*) buf;
 	tcp2 = (struct tcphdr*) (ip2 + 1);
 
-	len = sizeof(*i2) + cipherlen;
+	len = sizeof(*i2) + cipherlen + 1;
 	i2  = data_alloc(tc, ip2, tcp2, len, 0);
 
 	i2->i2_magic   = htonl(TC_INIT2);
-	i2->i2_len     = htonl(len);
-	i2->i2_scipher = tc->tc_cipher_sym;
-
 	memcpy(i2->i2_data, kxs, cipherlen);
+
+	i2->i2_data[cipherlen] = tc->tc_cipher_sym.sc_algo;
 
 	if (_conf.cf_rsa_client_hack)
 		memcpy(i2->i2_data, tc->tc_nonce, tc->tc_nonce_len);
@@ -2344,15 +2272,17 @@ static int process_init2(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	i2  = tcp_data(tcp);
 	len = tcp_data_len(ip, tcp);
 
-	nlen = len - sizeof(*i2);
-	if (nlen <= 0)
+	nlen = tc->tc_crypt_pub->cp_cipher_len;
+
+	if (sizeof(*i2) + nlen + 1 > len)
 		return bad_packet("init2: bad len");
 
-	if (!select_sym(tc, &i2->i2_scipher))
+	if (!select_sym(tc, (struct tc_scipher*) (i2->i2_data + nlen)))
 		return bad_packet("init2: select_sym()");
 
 	if (len > sizeof(tc->tc_init2))
 		return bad_packet("init2: too long");
+
 	memcpy(tc->tc_init2, i2, len);
 	tc->tc_init2_len = len;
 
@@ -2429,13 +2359,13 @@ static int check_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	if (len < sizeof(*record))
 		return -1;
 
-	if (len != ntohs(record->tr_len))
-		return -1;
-
-	if (ntohs(record->tr_type) != TCPOPT_MAC)
-		return -1;
-
 	dlen = len - sizeof(*record);
+
+	if (dlen != ntohs(record->tr_len))
+		return -1;
+
+	if (record->tr_control != 0)
+		return -1;
 
 	if (dlen < macsize)
 		return -1;
@@ -2457,24 +2387,20 @@ static int check_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	if (memcmp(&mac[tc->tc_mac_ivlen], computed_mac, tc->tc_mac_size) != 0)
 		return -2;
 
-	/* remove record & MAC */
-	memmove(record, record->tr_data, dlen);
-	set_ip_len(ip, (ip->ip_hl * 4) + (tcp->th_off * 4) + dlen);
-
 	return 0;
 }
 
 static int decrypt(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
-	uint8_t *data = tcp_data(tcp);
-	int dlen = tcp_data_len(ip, tcp);
+	struct tc_record *record = tcp_data(tcp);
+	int dlen = tcp_data_len(ip, tcp) - sizeof(*record);
 	void *iv = NULL;
 	struct crypt *c = tc->tc_key_active->tc_alg_rx->cs_cipher;
 
 	iv = get_iv(tc, ip, tcp);
 
-	if (dlen)
-		crypt_decrypt(c, iv, data, dlen);
+	if (dlen > 0)
+		crypt_decrypt(c, iv, record->tr_data, dlen);
 
 	return dlen;
 }
@@ -2489,9 +2415,8 @@ static struct tco_rekeystream *rekey_input(struct tc *tc, struct ip *ip,
 	    && tc->tc_keygenrx == tc->tc_keygen)
 		tc->tc_key_active = &tc->tc_key_next;
 
-	tr = (struct tco_rekeystream *) find_subopt(tcp, TCOP_REKEY);
-	if (!tr)
-		return NULL;
+	/* XXX TODO */
+	return NULL;
 
 	if (tr->tr_key == (uint8_t) ((tc->tc_keygen + 1))) {
 		do_rekey(tc);
@@ -2547,36 +2472,28 @@ static void rekey_input_post(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 	}
 }
 
-static int do_input_encrypting(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+static int check_mac_and_decrypt(struct tc *tc, struct ip *ip,
+				 struct tcphdr *tcp)
 {
 	int rc;
-	int v = DIVERT_ACCEPT;
-	struct tco_rekeystream *tr;
+	struct tc_flags *flags;
+	uint8_t *data = tcp_data(tcp);
+	int len = tcp_data_len(ip, tcp);
+	int maclen = tc->tc_mac_size + tc->tc_mac_ivlen;
+	uint8_t *clear;
 
-	tc->tc_key_active = &tc->tc_key_current;
-	tr = rekey_input(tc, ip, tcp);
+	if (len == 0)
+		return 0;
 
 	profile_add(1, "do_input pre check_mac");
+
 	if ((rc = check_mac(tc, ip, tcp))) {
-		/* XXX gross */
-		if (rc == -1) {
-			/* session caching */
-			if (tcp->th_flags == (TH_SYN | TH_ACK))
-				return DIVERT_ACCEPT;
-
-			/* pkey */
-			else if (is_init(ip, tcp, TC_INIT2)) {
-				ack(tc, ip, tcp);
-				return DIVERT_DROP;
-			}
-		}
-
 		xprintf(XP_ALWAYS, "MAC failed %d\n", rc);
 
 		if (_conf.cf_debug)
 			abort();
 
-		return DIVERT_DROP;
+		return -1;
 	} else if (tc->tc_sess) {
 		/* When we receive the first MACed packet, we know the other
 		 * side is setup so we can cache this session.
@@ -2587,17 +2504,54 @@ static int do_input_encrypting(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 
 	profile_add(1, "do_input post check_mac");
 
-	if (decrypt(tc, ip, tcp))
-		v = DIVERT_MODIFY;
+	decrypt(tc, ip, tcp);
 
 	profile_add(1, "do_input post decrypt");
 
+	len -= maclen;
+	len -= sizeof(struct tc_record);
+	len -= sizeof(*flags);
+
+	if (len < 0) {
+		xprintf(XP_ALWAYS, "Short packet\n");
+		return -1;
+	}
+
+	flags = (struct tc_flags*) (data + sizeof(struct tc_record));
+	clear = (uint8_t*) (flags + 1);
+
+	if (flags->tf_flags & TCF_URG) {
+		len   -= 2;
+		clear += 2;
+
+		if (len < 0) {
+			xprintf(XP_ALWAYS, "Short packett\n");
+			return -1;
+		}
+	}
+
+	/* remove record & MAC */
+	memmove(data, clear, len);
+	set_ip_len(ip, (ip->ip_hl * 4) + (tcp->th_off * 4) + len);
+
+	return 0;
+}
+
+static int do_input_encrypting(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+{
+	struct tco_rekeystream *tr;
+
+	tc->tc_key_active = &tc->tc_key_current;
+	tr = rekey_input(tc, ip, tcp);
+
+	if (check_mac_and_decrypt(tc, ip, tcp))
+		return DIVERT_DROP;
+
 	rekey_input_post(tc, ip, tcp, tr);
 
-	if (fixup_seq(tc, tcp, 1))
-		v = DIVERT_MODIFY;
+	fixup_seq(tc, tcp, 1);
 
-	return v;
+	return DIVERT_MODIFY;
 }
 
 static int do_input_init2_sent(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
@@ -2761,27 +2715,37 @@ static int tcp_input_post(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 static int do_input_nextk1_sent(struct tc *tc, struct ip *ip,
 				struct tcphdr *tcp)
 {
-	struct tc_subopt *sub;
+	struct tcpopt_eno *eno = find_opt(tcp, TCPOPT_ENO);
+	int len, i;
 
-	if (find_subopt(tcp, TCOP_NEXTK2_SUPPORT))
-		tc->tc_app_support |= 2;
-	else {
-		sub = find_subopt(tcp, TCOP_NEXTK2);
-		if (!sub) {
-			assert(tc->tc_sess->ts_used);
-			tc->tc_sess->ts_used = 0;
-			tc->tc_sess = NULL;
+	if (!eno) {
+		tc->tc_state = STATE_DISABLED;
 
-			if (!_conf.cf_nocache)
-				xprintf(XP_DEFAULT, "Session caching failed\n");
+		return DIVERT_ACCEPT;
+	}
 
-			return do_input_hello_sent(tc, ip, tcp);
+	len = eno->toe_len - 2;
+
+	assert(len >= 0);
+	check_app_support(tc, eno->toe_opts, len);
+
+	/* see if we can resume the session */
+	for (i = 0; i < len; i++) {
+		if (eno->toe_opts[i] == TC_RESUME) {
+			enable_encryption(tc);
+			return DIVERT_ACCEPT;
 		}
 	}
 
-	enable_encryption(tc);
+	/* nope */
+	assert(tc->tc_sess->ts_used);
+	tc->tc_sess->ts_used = 0;
+	tc->tc_sess = NULL;
 
-	return DIVERT_ACCEPT;
+	if (!_conf.cf_nocache)
+		xprintf(XP_DEFAULT, "Session caching failed\n");
+
+	return do_input_hello_sent(tc, ip, tcp);
 }
 
 static int do_input_nextk2_sent(struct tc *tc, struct ip *ip,
@@ -3264,18 +3228,18 @@ static void init_cipher(struct ciphers *c)
 {
 	struct crypt_pub *cp;
 	struct crypt_sym *cs;
-	unsigned int spec = htonl(c->c_cipher->c_id);
+	uint8_t spec = c->c_cipher->c_id;
 
 	switch (c->c_cipher->c_type) {
 	case TYPE_PKEY:
-		c->c_speclen = 3;
+		c->c_speclen = 1;
 
 		cp = c->c_cipher->c_ctr();
 		crypt_pub_destroy(cp);
 		break;
-	
+
 	case TYPE_SYM:
-		c->c_speclen = 4;
+		c->c_speclen = 1;
 
 		cs = crypt_new(c->c_cipher->c_ctr);
 		crypt_sym_destroy(cs);

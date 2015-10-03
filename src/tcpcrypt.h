@@ -7,14 +7,16 @@
 
 #define TC_DUMMY	0x69
 
+#define TC_OPT_VLEN	0x80
+
 enum {
-	TC_CIPHER_OAEP_RSA_3 = 0x0100,
-	TC_CIPHER_ECDHE_P256 = 0x0200,
-	TC_CIPHER_ECDHE_P521 = 0x0201,
+	TC_RESUME	     = 0x20,
+	TC_CIPHER_ECDHE_P256 = 0x21,
+	TC_CIPHER_ECDHE_P521 = 0x22,
 };
 
 enum {
-	TC_AES128_HMAC_SHA2 = 0x00000100,
+	TC_AES128_HMAC_SHA2 = 0x01,
 };
 
 enum {
@@ -34,12 +36,11 @@ enum {
 };
 
 struct tc_cipher_spec {
-	uint8_t  tcs_algo_top;
-	uint16_t tcs_algo;
+	uint8_t  tcs_algo;
 } __attribute__ ((gcc_struct, __packed__));
 
 struct tc_scipher {
-	uint32_t sc_algo;
+	uint8_t sc_algo;
 };
 
 enum {
@@ -102,6 +103,7 @@ struct tc_sess {
 	struct stuff		ts_sid;
 	struct stuff		ts_nk;
 	struct stuff		ts_mk;
+	uint8_t			ts_pub_spec;
 	int			ts_role;
 	struct in_addr		ts_ip;
 	int			ts_port;
@@ -112,6 +114,19 @@ struct tc_sess {
 
 struct tc_sid {
         uint8_t ts_sid[9];
+} __attribute__ ((__packed__));
+
+struct tc_sess_opt {
+	uint8_t	      ts_opt;
+	uint8_t	      ts_subopt;
+	struct tc_sid ts_sid;
+} __attribute__ ((__packed__));
+
+#define TCF_URG 0x4
+
+struct tc_flags {
+	uint8_t		tf_flags;
+	uint16_t	tf_urp[0];
 } __attribute__ ((__packed__));
 
 #define TC_MTU		1500
@@ -216,6 +231,8 @@ struct tc {
 	int			tc_init2_len;
 	unsigned char		tc_pms[128];
 	int			tc_pms_len;
+	unsigned char		tc_eno[1500];
+	int			tc_eno_len;
 };
 
 enum {  
@@ -234,9 +251,6 @@ enum {
 };
 
 struct tc_subopt {
-	uint8_t	tcs_op;
-	uint8_t	tcs_len;
-	uint8_t	tcs_data[0];
 };
 
 struct tco_rekeystream {
@@ -250,11 +264,12 @@ struct tco_rekeystream {
 #define TCPOPT_MD5	19
 #define TCPOPT_CRYPT	69
 #define TCPOPT_MAC	70
+#define TCPOPT_ENO	71
 
-struct tcpopt_crypt {
-	uint8_t		 toc_kind;
-	uint8_t		 toc_len;
-	struct tc_subopt toc_opts[0];
+struct tcpopt_eno {
+	uint8_t		 toe_kind;
+	uint8_t		 toe_len;
+	uint8_t		 toe_opts[0];
 };
 
 struct tcpopt_mac {
@@ -287,24 +302,17 @@ enum {
 
 struct tc_init1 {
 	uint32_t		i1_magic;
-	uint32_t		i1_len;
-	uint8_t			i1_z0;
-	struct tc_cipher_spec	i1_pub;
-	uint16_t		i1_z1;
-	uint16_t		i1_num_ciphers;
-	struct tc_scipher	i1_ciphers[0];
+	uint8_t			i1_data[0];
 } __attribute__ ((__packed__));
 
 struct tc_init2 {
 	uint32_t		i2_magic;
-	uint32_t		i2_len;
-	struct tc_scipher	i2_scipher;
 	uint8_t			i2_data[0];
 } __attribute__ ((__packed__));
 
 struct tc_record {
+	uint8_t	 tr_control;
 	uint16_t tr_len;
-	uint16_t tr_type;
 	uint8_t  tr_data[0];
 } __attribute__ ((__packed__));
 

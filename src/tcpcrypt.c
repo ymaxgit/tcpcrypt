@@ -56,6 +56,7 @@ static struct tc_scipher	_sym[MAX_CIPHERS];
 static int			_sym_len;
 
 typedef int (*opt_cb)(struct tc *tc, int tcpop, int len, void *data);
+typedef int (*sm_cb)(struct tc_seq *s, uint32_t seq);
 
 static void *get_free(struct freelist *f, unsigned int sz)
 {
@@ -991,6 +992,149 @@ static int do_output_hello_rcvd(struct tc *tc, struct ip *ip,
 	return DIVERT_MODIFY;
 }
 
+static int seqmap_find_start(struct tc_seq *s, uint32_t seq)
+{
+	return s->sm_start == seq;
+}
+
+static int seqmap_find_end(struct tc_seq *s, uint32_t seq)
+{
+	return s->sm_end == seq;
+}
+
+/* kernel -> internet */
+static int seqmap_find_ack_out(struct tc_seq *s, uint32_t ack)
+{
+	return (s->sm_end - s->sm_off) == ack;
+}
+
+/* internet -> kernel */
+static int seqmap_find_ack_in(struct tc_seq *s, uint32_t ack)
+{
+	return (s->sm_end + s->sm_off) == ack;
+}
+
+static struct tc_seq *seqmap_find(struct tc_seqmap *sm, uint32_t seq, sm_cb cb)
+{
+	int i = sm->sm_idx;
+
+	do {
+		struct tc_seq *s = &sm->sm_seq[i];
+
+		if (s->sm_start == 0 && s->sm_end == 0 && s->sm_off == 0)
+			return NULL;
+
+		if (cb(s, seq))
+			return s;
+
+		if (i == 0)
+			i = MAX_SEQMAP - 1;
+		else
+			i--;
+	} while (i != sm->sm_idx);
+
+	return NULL;
+}
+
+static uint32_t get_seq_off(struct tc *tc, uint32_t seq,
+			    struct tc_seqmap *seqmap, sm_cb cb)
+{
+	struct tc_seq *s = seqmap_find(seqmap, seq, cb);
+
+	if (!s)
+		return 0; /* XXX */
+
+	return s->sm_off;
+}
+
+static void add_seq(struct tc *tc, struct ip *ip, struct tcphdr *tcp, int len,
+		    struct tc_seqmap *seqmap)
+{
+	uint32_t dlen = tcp_data_len(ip, tcp);
+	uint32_t seq  = ntohl(tcp->th_seq);
+	uint32_t off  = len;
+	struct tc_seq *s, *rtr;
+
+	/* find cumulative offset until now, based on last packet */
+	s = seqmap_find(seqmap, seq, seqmap_find_end);
+	if (!s) {
+		/* can't find last packet... but it's ok if we just started */
+		s = &seqmap->sm_seq[seqmap->sm_idx];
+
+		if (seqmap->sm_idx != 0 
+		    || s->sm_start != 0 || s->sm_end != 0 || s->sm_off != 0) {
+			xprintf(XP_ALWAYS, "Damn - can't find seq %u\n", seq);
+			return;
+		}
+	}
+
+	/* Check if it's a retransmit.
+	 * XXX be more efficient
+	 */
+	rtr = seqmap_find(seqmap, seq, seqmap_find_start);
+	if (rtr) {
+		if (rtr->sm_end != (seq + dlen)) {
+			xprintf(XP_ALWAYS, "Damn - retransmitted diff size\n");
+			return;
+		}
+
+		/* retransmit */
+		return;
+	}
+
+	off += s->sm_off;
+
+	/* add an entry for this packet */
+	seqmap->sm_idx = (seqmap->sm_idx + 1) % MAX_SEQMAP;
+	s = &seqmap->sm_seq[seqmap->sm_idx];
+
+	s->sm_start = seq;
+	s->sm_end   = seq + dlen;
+	s->sm_off   = off;
+}
+
+/* 
+ * 1.  Record an entry for how much padding we're adding for this packet.
+ * 2.  Fix up the sequence number for this packet.
+ */
+static int fixup_seq_add(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
+			 int len, int in)
+{
+	uint32_t ack, seq;
+
+	if (in) {
+		if (len)
+			add_seq(tc, ip, tcp, len, &tc->tc_rseqm);
+
+		ack  = ntohl(tcp->th_ack) - tc->tc_seq_off;
+		ack -= get_seq_off(tc, ack, &tc->tc_seqm, seqmap_find_ack_in);
+
+		tcp->th_ack = htonl(ack);
+
+		seq  = ntohl(tcp->th_seq);
+		seq -= get_seq_off(tc, seq, &tc->tc_rseqm, seqmap_find_end);
+		seq -= tc->tc_rseq_off;
+
+		tcp->th_seq = htonl(seq);
+	} else {
+		if (len)
+			add_seq(tc, ip, tcp, len, &tc->tc_seqm);
+
+		seq  = ntohl(tcp->th_seq);
+		seq += get_seq_off(tc, seq, &tc->tc_seqm, seqmap_find_end);
+		seq += tc->tc_seq_off;
+
+		tcp->th_seq = htonl(seq);
+
+		ack  = ntohl(tcp->th_ack) + tc->tc_rseq_off;
+		ack += get_seq_off(tc, ack, &tc->tc_rseqm, seqmap_find_ack_out);
+
+		tcp->th_ack = htonl(ack);
+	}
+
+	return 1;
+}
+
 static void *data_alloc(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 			int len, int retx)
 {
@@ -1192,10 +1336,10 @@ static int encrypt_and_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	struct tc_flags *flags;
 	uint8_t *mac;
 
-	iv = get_iv(tc, ip, tcp);
-
-	if (!dlen)
+	if (!dlen) {
+		fixup_seq_add(tc, ip, tcp, 0, 0);
 		return 0;
+	}
 
 	/* TLV + flags */
 	head = sizeof(*record) + 1;
@@ -1203,8 +1347,13 @@ static int encrypt_and_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	if (tcp->th_flags & TH_URG)
 		head += 2;
 
+	/* XXX should check if add_data fails first */
+	fixup_seq_add(tc, ip, tcp, head + maclen, 0);
+
 	if (add_data(tc, ip, tcp, head, maclen))
 		return -1;
+
+	iv = get_iv(tc, ip, tcp);
 
 	/* Prepare TLV */
 	record = tcp_data(tcp);
@@ -1232,62 +1381,11 @@ static int encrypt_and_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	return 0;
 }
 
-static int fixup_seq(struct tc *tc, struct tcphdr *tcp, int in)
-{
-	if (!tc->tc_seq_off)
-		return 0;
-
-	if (in) {
-		tcp->th_ack = htonl(ntohl(tcp->th_ack) - tc->tc_seq_off);
-		tcp->th_seq = htonl(ntohl(tcp->th_seq) - tc->tc_rseq_off);
-	} else {
-		tcp->th_seq = htonl(ntohl(tcp->th_seq) + tc->tc_seq_off);
-		tcp->th_ack = htonl(ntohl(tcp->th_ack) + tc->tc_rseq_off);
-	}
-
-	return 1;
-}
-
 static int connected(struct tc *tc)
 {
 	return tc->tc_state == STATE_ENCRYPTING 
 	       || tc->tc_state == STATE_REKEY_SENT
 	       || tc->tc_state == STATE_REKEY_RCVD;
-}
-
-static int do_compress(struct tc *tc, int tcpop, int len, void *data)
-{
-	uint8_t *p = data;
-
-	len += 2;
-	p   -= 2;
-
-	memcpy(&tc->tc_opt[tc->tc_optlen], p, len);
-
-	tc->tc_optlen += len;
-	assert(tc->tc_optlen <= sizeof(tc->tc_opt));
-
-	return 0;
-}
-
-static void compress_options(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
-{
-	int len;
-	int max = 60;
-	void *p;
-
-	memset(tc->tc_opt, TCPOPT_EOL, sizeof(tc->tc_opt));
-	tc->tc_optlen = 0;
-	foreach_opt(tc, tcp, do_compress);
-
-	len = max - (tcp->th_off << 2);
-	assert(len >= 0);
-	if (len) {
-		p = tcp_opts_alloc(tc, ip, tcp, len);
-		assert(p);
-	}
-
-	memcpy(tcp + 1, tc->tc_opt, sizeof(tc->tc_opt));
 }
 
 static void do_rekey(struct tc *tc)
@@ -1334,68 +1432,6 @@ static int rekey_complete(struct tc *tc)
 	return 1;
 }
 
-static void rekey_output(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
-{
-	int rk = 0;
-	struct tco_rekeystream *tr;
-
-	/* got all old packets from the other dude, lets rekey our side */
-	if (tc->tc_state == STATE_REKEY_RCVD
-	    && ntohl(tcp->th_ack) >= tc->tc_rekey_seq) {
-	    	xprintf(XP_DEBUG, "RX rekey done %d %p\n", tc->tc_keygen, tc);
-		tc->tc_keygenrx++;
-		assert(tc->tc_keygenrx == tc->tc_keygen);
-		if (rekey_complete(tc))
-			return;
-
-		tc->tc_state	  = STATE_REKEY_SENT;
-		tc->tc_rekey_seq  = ntohl(tcp->th_seq);
-		tc->tc_sent_bytes = 0;
-	}
-
-	/* half way through rekey - figure out current key */
-	if (tc->tc_keygentx != tc->tc_keygenrx
-	    && tc->tc_keygentx == tc->tc_keygen)
-		tc->tc_key_active = &tc->tc_key_next;
-
-	/* XXX check if proto supports rekey */
-
-	if (!rk)
-		return;
-
-	/* initiate rekey */
-	if (tc->tc_sent_bytes > rk && tc->tc_state != STATE_REKEY_RCVD) {
-		do_rekey(tc);
-
-		tc->tc_sent_bytes = 0;
-		tc->tc_rekey_seq  = ntohl(tcp->th_seq);
-		tc->tc_state      = STATE_REKEY_SENT;
-	}
-
-	if (tc->tc_state != STATE_REKEY_SENT)
-		return;
-
-	/* old shit - send with old key */
-	if (ntohl(tcp->th_seq) < tc->tc_rekey_seq) {
-		assert(ntohl(tcp->th_seq) + tcp_data_len(ip, tcp)
-		       <= tc->tc_rekey_seq);
-
-		return;
-	}
-
-	/* send rekeys */
-	compress_options(tc, ip, tcp);
-
-	/* XXX TODO */
-	tr = NULL;
-	assert(tr);
-
-	tr->tr_op  	  = TCOP_REKEY;
-	tr->tr_key	  = tc->tc_keygen;
-	tr->tr_seq	  = htonl(tc->tc_rekey_seq);
-	tc->tc_key_active = &tc->tc_key_next;
-}
-
 static int do_output_encrypting(struct tc *tc, struct ip *ip,
 				struct tcphdr *tcp)
 {
@@ -1408,10 +1444,7 @@ static int do_output_encrypting(struct tc *tc, struct ip *ip,
 
 	assert(!(tcp->th_flags & TH_SYN));
 
-	fixup_seq(tc, tcp, 0);
-
 	tc->tc_key_active = &tc->tc_key_current;
-	rekey_output(tc, ip, tcp);
 
 	profile_add(1, "do_output pre sym encrypt");
 	if (encrypt_and_mac(tc, ip, tcp)) {
@@ -2374,8 +2407,10 @@ static int check_mac_and_decrypt(struct tc *tc, struct ip *ip,
 	void *iv = get_iv(tc, ip, tcp);
 	int dlen;
 
-	if (len == 0)
+	if (len == 0) {
+		fixup_seq_add(tc, ip, tcp, 0, 1);
 		return 0;
+	}
 
 	/* basic length check */
 	if (len < (sizeof(*record) + maclen))
@@ -2446,6 +2481,8 @@ static int check_mac_and_decrypt(struct tc *tc, struct ip *ip,
 		}
 	}
 
+	fixup_seq_add(tc, ip, tcp, len - dlen, 1);
+
 	/* remove record, flags, MAC */
 	memmove(record, clear, dlen);
 	set_ip_len(ip, (ip->ip_hl * 4) + (tcp->th_off * 4) + dlen);
@@ -2464,8 +2501,6 @@ static int do_input_encrypting(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 		return DIVERT_DROP;
 
 	rekey_input_post(tc, ip, tcp, tr);
-
-	fixup_seq(tc, tcp, 1);
 
 	return DIVERT_MODIFY;
 }

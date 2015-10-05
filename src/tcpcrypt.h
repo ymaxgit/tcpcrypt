@@ -156,6 +156,26 @@ struct tc_keyset {
 	struct crypt_sym	*tc_alg_rx;
 };
 
+/* Contains vanilla sequence numbers as received by tcpcryptd.  off is the
+ * padding (tc_record) added (or removed) by tcpcryptd to that packet.
+ *
+ * kernel   -> tcpcryptd.  [add off]
+ * internet -> tcpcryptd.  [sub off]
+ */
+struct tc_seq {
+	uint32_t sm_start;
+	uint32_t sm_end;
+	uint32_t sm_off;
+};
+
+/* should be proportional to window size (in packets) */
+#define MAX_SEQMAP	100
+
+struct tc_seqmap {
+	struct tc_seq sm_seq[MAX_SEQMAP];
+	int	      sm_idx;
+};
+
 struct conn;
 
 struct tc {
@@ -183,6 +203,8 @@ struct tc {
 	int			tc_mss_clamp;
 	int			tc_seq_off;
 	int			tc_rseq_off;
+	struct tc_seqmap	tc_seqm;
+	struct tc_seqmap	tc_rseqm;
 	int			tc_sack_disable;
 	int			tc_rto;
 	void			*tc_timer;

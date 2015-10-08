@@ -32,6 +32,7 @@
 #define MAX_TIMERS 1024
 
 struct conf _conf;
+struct divert *_divert;
 
 struct backlog_ctl {
 	struct backlog_ctl	*bc_next;
@@ -113,7 +114,7 @@ static void ensure_socket_address_unlinked(struct socket_address *sa)
 
 static void cleanup()
 {
-	divert_close();
+	_divert->close();
 
 	if (_state.s_ctl > 0)
 		close(_state.s_ctl);
@@ -850,7 +851,8 @@ static void do_cycle(void)
 
 	dispatch_timers();
 
-	divert_cycle();
+	if (_divert->cycle)
+		_divert->cycle();
 }
 
 static void do_test(void)
@@ -926,7 +928,7 @@ struct fd *add_fd(int f, fd_cb cb)
 
 static void process_divert(struct fd *fd)
 {
-	divert_next_packet(fd->fd_fd);
+	_divert->next_packet(fd->fd_fd);
 	backlog_ctl_process();
 }
 
@@ -937,7 +939,10 @@ static void process_ctl(struct fd *fd)
 
 void tcpcryptd(void)
 {
-	_state.s_divert = divert_open(_conf.cf_divert, packet_handler);
+	_divert = divert_get();
+	assert(_divert);
+
+	_state.s_divert = _divert->open(_conf.cf_divert, packet_handler);
 
 	_state.s_ctl = bind_control_socket(&_state.s_ctl_addr, _conf.cf_ctl);
 

@@ -270,6 +270,7 @@ struct tc {
 	uint64_t		tc_rdr_tx;
 	uint64_t		tc_rdr_rx;
 	int			tc_rdr_inbound;
+	int			tc_rdr_drop_sa;
 };
 
 enum {  

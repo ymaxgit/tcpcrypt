@@ -519,9 +519,17 @@ static void sockopt_clear(unsigned short port)
 	_sockopts[port] = NULL;
 }
 
+struct tcphdr *get_tcp(struct ip *ip)
+{
+        return (struct tcphdr*) ((unsigned long) ip + ip->ip_hl * 4);
+}
+
 static void do_inject_ip(struct ip *ip)
 {
-	divert_inject(ip, ntohs(ip->ip_len));
+	xprintf(XP_NOISY, "Injecting ");
+	print_packet(ip, get_tcp(ip), 0, NULL);
+
+	_divert->inject(ip, ntohs(ip->ip_len));
 }
 
 static void inject_ip(struct ip *ip)
@@ -923,11 +931,6 @@ static void set_eno_transcript(struct tc *tc, struct tcphdr *tcp)
 	tc->tc_eno_len += 2;
 }
 
-struct tcphdr *get_tcp(struct ip *ip)
-{
-        return (struct tcphdr*) ((unsigned long) ip + ip->ip_hl * 4);
-}
-
 static void send_rst(struct tc *tc)
 {
         struct ip *ip = (struct ip*) tc->tc_rdr_buf;
@@ -992,7 +995,8 @@ static void rdr_check_connect(struct tc *tc)
 	}
 
 	/* inject the local SYN so that user connects to proxy */
-        do_inject_ip(ip);
+	if (!tc->tc_rdr_peer->tc_rdr_drop_sa)
+		do_inject_ip(ip);
 }
 
 static int do_output_closed(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
@@ -1207,10 +1211,13 @@ static void add_seq(struct tc *tc, struct ip *ip, struct tcphdr *tcp, int len,
  * 1.  Record an entry for how much padding we're adding for this packet.
  * 2.  Fix up the sequence number for this packet.
  */
-static int fixup_seq_add(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
-			 int len, int in)
+static void fixup_seq_add(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
+			  int len, int in)
 {
 	uint32_t ack, seq;
+
+	if (_conf.cf_rdr)
+		return;
 
 	if (in) {
 		if (len)
@@ -1242,7 +1249,7 @@ static int fixup_seq_add(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 		tcp->th_ack = htonl(ack);
 	}
 
-	return 1;
+	return;
 }
 
 static void *data_alloc(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
@@ -3148,15 +3155,16 @@ static void rdr_remote_handler(struct fd *fd)
 	rdr_local_handler(fd);
 }
 
-static void rdr_new_connection(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+static void rdr_new_connection(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
+			       int flags)
 {
         struct sockaddr_in from, to;
-        int s, flags, rc;
+        int s, nb, rc;
         struct fd *sock;
         socklen_t len;
         int tos = IPTOS_RELIABILITY;
 	struct tc *peer;
-	int in = tc->tc_dir_packet == DIR_IN;
+	int in = flags & DF_IN;
 
         /* figure out where connection is going to */
         memset(&to, 0, sizeof(to));
@@ -3170,16 +3178,30 @@ static void rdr_new_connection(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
         to.sin_port          = tcp->th_dport;
         to.sin_addr.s_addr   = ip->ip_dst.s_addr;
 
+	/* XXX this is retarded - we rely on the SYN retransmit to kick things
+	 * off again
+	 */
+	if (_divert->orig_dest(&to, ip, &flags) == -1) {
+		tc->tc_rdr_drop_sa = 1;
+		xprintf(XP_ALWAYS, "Can't find RDR\n");
+		return;
+	}
+
+	in = flags & DF_IN;
+
+	xprintf(XP_ALWAYS, "RDR orig dest %s:%d\n",
+		inet_ntoa(to.sin_addr), ntohs(to.sin_port));
+
         /* connect to destination */
         if ((s = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1)
                 err(1, "socket()");
 
-        if ((flags = fcntl(s, F_GETFL)) == -1)
+        if ((nb = fcntl(s, F_GETFL)) == -1)
                 err(1, "fcntl()");
 
-        flags |= O_NONBLOCK;
+        nb |= O_NONBLOCK;
 
-        if (fcntl(s, F_SETFL, flags) == -1)
+        if (fcntl(s, F_SETFL, nb) == -1)
                 err(1, "fcntl()");
 
 	/* signal handshake to firewall */
@@ -3200,7 +3222,7 @@ static void rdr_new_connection(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	}
 
 	/* XXX */
-	if (in) {
+	if (in && !tc->tc_rdr_drop_sa) {
 		to.sin_port = htons(REDIRECT_PORT);
 	} else {
 		len = sizeof(from);
@@ -3240,42 +3262,67 @@ static void rdr_new_connection(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
         memcpy(peer->tc_rdr_buf, ip, len);
         peer->tc_rdr_len = len;
 
+	if (!in) {
+		ip  = (struct ip *) peer->tc_rdr_buf;
+		tcp = get_tcp(ip);
+
+		ip->ip_dst.s_addr = to.sin_addr.s_addr;
+		tcp->th_dport     = to.sin_port;
+		checksum_packet(tc, ip, tcp);
+	}
+
 	tc->tc_rdr_peer  = peer;
 	tc->tc_rdr_state = STATE_RDR_LOCAL;
 
 	return;
 }
 
+static int handle_syn_ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+{
+	switch (tc->tc_state) {
+	case STATE_HELLO_RCVD:
+		return do_output_hello_rcvd(tc, ip, tcp);
+
+	case STATE_NEXTK2_SENT:
+		/* syn ack rtx */
+	case STATE_NEXTK1_RCVD:
+		return do_output_nextk1_rcvd(tc, ip, tcp);
+
+	case STATE_RDR_PLAIN:
+		break;
+
+	default:
+		return DIVERT_DROP;
+	}
+
+	return DIVERT_ACCEPT;
+}
+
 static int rdr_syn_ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
 	struct tc *peer = tc->tc_rdr_peer;
+
+	/* Linux: we let the SYN through but not the SYN ACK.  We need to let
+	 * the SYN through so we can get orig dest.
+	 */
+	if (tc->tc_rdr_state == STATE_RDR_NONE) {
+		tc->tc_rdr_drop_sa = 1;
+
+		return DIVERT_DROP;
+	}
+
+	if (tc->tc_rdr_drop_sa)
+		return handle_syn_ack(tc, ip, tcp);
 
 	if (tc->tc_rdr_inbound) {
 		int rc;
 
 		assert(peer);
 
-		switch (peer->tc_state) {
-		case STATE_HELLO_RCVD:
-			rc = do_output_hello_rcvd(peer, ip, tcp);
+		rc = handle_syn_ack(peer, ip, tcp);
 
-			if (rc == DIVERT_DROP)
-				return rc;
-
-			break;
-
-		case STATE_NEXTK2_SENT:
-			/* syn ack rtx */
-		case STATE_NEXTK1_RCVD:
-			rc = do_output_nextk1_rcvd(peer, ip, tcp);
-			break;
-
-		case STATE_RDR_PLAIN:
-			break;
-
-		default:
+		if (rc == DIVERT_DROP)
 			return DIVERT_DROP;
-		}
 
 		/* we're still redirecting manually */
 		ip->ip_src.s_addr = peer->tc_rdr_addr.sin_addr.s_addr;
@@ -3304,7 +3351,7 @@ static int rdr_syn_ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 		rdr_handshake_complete(tc);
 	}
 
-	return DIVERT_DROP;
+	return DIVERT_ACCEPT;
 }
 
 static int rdr_ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
@@ -3334,21 +3381,25 @@ static int rdr_ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	return DIVERT_DROP;
 }
 
-static int rdr_syn(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+static int rdr_syn(struct tc *tc, struct ip *ip, struct tcphdr *tcp, int flags)
 {
-	int in = tc->tc_dir_packet == DIR_IN;
-
-        /* our own connections */
-        if (ip->ip_dst.s_addr == inet_addr("127.0.0.1")
-            && ip->ip_dst.s_addr == ip->ip_src.s_addr)
-                return DIVERT_ACCEPT;
+	int in = flags & DIR_IN;
 
 	/* new connection */
 	if (tc->tc_rdr_state == STATE_RDR_NONE)
-		rdr_new_connection(tc, ip, tcp);
+		rdr_new_connection(tc, ip, tcp, flags);
+
+	if (tc->tc_rdr_state == STATE_RDR_NONE)
+		return DIVERT_ACCEPT;
 
 	/* incoming */
 	if (in) {
+		/* drop the locally generated SYN */
+		if (tc->tc_rdr_state == STATE_RDR_LOCAL
+		    && !tc->tc_rdr_drop_sa) {
+			return DIVERT_DROP;
+		}
+
 		switch (tc->tc_state) {
 		case STATE_NEXTK1_RCVD:
 			/* XXX check same SID */
@@ -3360,7 +3411,7 @@ static int rdr_syn(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 				tc->tc_state = STATE_RDR_PLAIN;
 
 			/* XXX clamp MSS */
-			return DIVERT_DROP;
+			return DIVERT_ACCEPT;
 		}
 
 		return DIVERT_DROP;
@@ -3383,10 +3434,16 @@ static int rdr_syn(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	return DIVERT_DROP;
 }
 
-static int rdr_packet(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+static int rdr_packet(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
+		      int flags)
 {
+        /* our own connections */
+        if (ip->ip_dst.s_addr == inet_addr("127.0.0.1")
+            && ip->ip_dst.s_addr == ip->ip_src.s_addr)
+                return DIVERT_ACCEPT;
+
 	if (tcp->th_flags == TH_SYN)
-		return rdr_syn(tc, ip, tcp);
+		return rdr_syn(tc, ip, tcp, flags);
 
 	if (tcp->th_flags == (TH_SYN | TH_ACK))
 		return rdr_syn_ack(tc, ip, tcp);
@@ -3443,7 +3500,7 @@ int tcpcrypt_packet(void *packet, int len, int flags)
 	tc->tc_csum       = 0;
 
 	if (_conf.cf_rdr) {
-		rc = rdr_packet(tc, ip, tcp);
+		rc = rdr_packet(tc, ip, tcp, flags);
 	} else {
 		if (flags & DF_IN)
 			rc = do_input(tc, ip, tcp);

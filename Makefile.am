@@ -97,10 +97,6 @@ src_tcpcryptd_SOURCES = \
 
 src_tcpcryptd_LDADD = @tcpcryptd_LDADD@ @crypto_LDADD@
 
-if OS_OSX
-src_tcpcryptd_SOURCES += src/pcap.c
-endif
-
 if OS_BSD
 src_tcpcryptd_SOURCES += src/freebsd.c
 endif

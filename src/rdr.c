@@ -28,6 +28,8 @@
 
 #define REDIRECT_PORT 65530
 
+extern int pcap_set_want_pktap(pcap_t *, int);
+
 struct sock;
 typedef void (*sock_handler)(struct sock *s);
 
@@ -76,6 +78,7 @@ static struct sock {
 	unsigned char		buf[2048];
 	int			len;
 	int			local;
+	int			need_eno_ack;
 	struct sock		*next;
 } socks_;
 
@@ -336,6 +339,7 @@ static void check_connect(struct sock *sock)
 {
 	int e;
 	socklen_t len = sizeof(e);
+        int tos = 0;
 
 	if (getsockopt(sock->s, SOL_SOCKET, SO_ERROR, &e, &len) == -1) {
 		perror("getsockopt()");
@@ -350,6 +354,15 @@ static void check_connect(struct sock *sock)
 		kill_sock(sock);
 		return;
 	}
+
+	/* XXX we should set this only when we receive traffic from other end.
+	 * Else our pakcet might have been lost and retransmitted without ENO
+	 */
+        if (setsockopt(sock->s, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)) == -1) {
+            perror("getsockopt(IP_TOS)");
+            kill_sock(sock);
+            return;
+        }
 
 	printf("I CONNECTED BRO\n");
 
@@ -468,6 +481,7 @@ static void add_connection(struct ip *ip, struct tcphdr *tcp, int local)
 	int s, flags, rc;
 	struct sock *sock, *peer;
 	socklen_t len;
+        int tos = IPTOS_RELIABILITY;
 
 	/* figure out where connection is going to */
 	memset(&to, 0, sizeof(to));
@@ -503,6 +517,11 @@ static void add_connection(struct ip *ip, struct tcphdr *tcp, int local)
 
 	if (fcntl(s, F_SETFL, flags) == -1)
 		err(1, "fcntl()");
+
+        if (setsockopt(s, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)) == -1)
+            err(1, "setsockopt()");
+
+	sock->need_eno_ack = 1;
 
 	rc = connect(s, (struct sockaddr*) &sock->to, sizeof(sock->to));
 	if (rc == -1 && errno != EINPROGRESS)
@@ -591,9 +610,24 @@ static void handle_syn_ack(struct ip *ip, struct tcphdr *tcp)
 	}
 }
 
-static void handle_syn(struct ip *ip, struct tcphdr *tcp)
+static struct sock *get_sock(struct ip *ip, struct tcphdr *tcp)
 {
 	struct sock *s = &socks_;
+
+	while ((s = s->next)) {
+		if (s->to.sin_addr.s_addr == ip->ip_dst.s_addr
+		    && s->to.sin_port == tcp->th_dport
+		    && s->from.sin_addr.s_addr == ip->ip_src.s_addr
+		    && s->from.sin_port == tcp->th_sport)
+			return s;
+	}
+
+	return NULL;
+}
+
+static void handle_syn(struct ip *ip, struct tcphdr *tcp)
+{
+	struct sock *s;
 
 	/* our injection */
 	if (ip->ip_tos == 0x22)
@@ -611,34 +645,41 @@ static void handle_syn(struct ip *ip, struct tcphdr *tcp)
 	 * 2. We sent out the SYN (proxy connection).
 	 *
 	 */
-	while ((s = s->next)) {
-		if (s->to.sin_addr.s_addr != ip->ip_dst.s_addr
-		    || s->to.sin_port != tcp->th_dport)
-			continue;
+	if ((s = get_sock(ip, tcp))) {
+		/* SYN we generated that we gotta modify */
+		if (s->state == STATE_CONNECT)
+			modify_syn(s, ip, tcp);
 
-		if (s->from.sin_addr.s_addr == ip->ip_src.s_addr
-		    && s->from.sin_port == tcp->th_sport) {
-
-			/* SYN we generated that we gotta modify */
-			if (s->state == STATE_CONNECT)
-				modify_syn(s, ip, tcp);
-
-			/* Kernel sending more SYNs on ongoing connection */
-			return;
-		}
+		/* Kernel sending more SYNs on ongoing connection */
+		return;
 	}
 
 	/* must be new connection */
 	int local = 0;
 
 	/* XXX */
-	if (ip->ip_dst.s_addr == inet_addr("172.16.9.1"))
+	if (ip->ip_dst.s_addr == inet_addr("172.16.145.1"))
 		local = 1;
 	else
 		local = 0;
 
 	add_connection(ip, tcp, local);
 	dump_socks();
+}
+
+static void handle_ack(struct ip *ip, struct tcphdr *tcp)
+{
+	struct sock *s = get_sock(ip, tcp);
+
+	if (!s || !s->need_eno_ack)
+		return;
+
+	printf("HANDLE ACK\n");
+
+	/* XXX delay this until we know that ACK made it */
+	s->need_eno_ack = 0;
+
+	inject_ip(ip);
 }
 
 static void pcap_in_handler(struct sock *pcap)
@@ -703,11 +744,14 @@ static void pcap_in_handler(struct sock *pcap)
 		       tcp->th_flags & TH_ACK ? "A" : "");
 	}
 
+	if (tcp->th_flags == TH_SYN)
+		handle_syn(ip, tcp);
+
 	if (tcp->th_flags == (TH_SYN | TH_ACK))
 		handle_syn_ack(ip, tcp);
 
-	if (tcp->th_flags == TH_SYN)
-		handle_syn(ip, tcp);
+	if (tcp->th_flags == TH_ACK)
+		handle_ack(ip, tcp);
 
 	return;
 __bad_packet:
@@ -718,12 +762,24 @@ __bad_packet:
 static void setup_pcap(void)
 {
 	char buf[PCAP_ERRBUF_SIZE];
-	pcap_t *p = pcap_open_live("any", 4096, 1, 1, buf);
+	pcap_t *p;
 	int fd;
 	struct sock *s;
 
+	p = pcap_create("any", buf);
+
 	if (!p)
 		errx(1, "pcap_open_live(): %s", buf);
+
+	pcap_set_want_pktap(p, 1);
+	pcap_set_snaplen(p, 2048);
+	pcap_set_timeout(p, 1000);
+	pcap_activate(p);
+
+	if (pcap_set_datalink(p, DLT_PKTAP) == -1) {
+		pcap_perror(p, "pcap_set_datalink()");
+		exit(1);
+	}
 
 	if ((fd = pcap_get_selectable_fd(p)) == -1)
 		errx(1, "pcap_get_selectable_fd()");

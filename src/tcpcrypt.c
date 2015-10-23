@@ -1186,7 +1186,7 @@ static int do_output_pkconf_rcvd(struct tc *tc, struct ip *ip,
 	uint8_t *p;
 
 	/* Add the minimal ENO option to indicate support */
-	len = sizeof(*eno) + sizeof(tc->tc_cipher_pkey);
+	len = sizeof(*eno);
 	eno = tcp_opts_alloc(tc, ip, tcp, len);
 	if (!eno) {
 		xprintf(XP_ALWAYS, "No space for ENO\n");
@@ -1196,7 +1196,6 @@ static int do_output_pkconf_rcvd(struct tc *tc, struct ip *ip,
 	}
 	eno->toe_kind = TCPOPT_ENO;
 	eno->toe_len  = len;
-	memcpy(eno->toe_opts, &tc->tc_cipher_pkey, sizeof(tc->tc_cipher_pkey));
 
 	if (!retx)
 		generate_nonce(tc, tc->tc_crypt_pub->cp_n_c);

@@ -1182,7 +1182,20 @@ static int do_output_pkconf_rcvd(struct tc *tc, struct ip *ip,
 	int len, klen;
 	struct tc_init1 *init1;
 	void *key;
+	struct tcpopt_eno *eno;
 	uint8_t *p;
+
+	/* Add the minimal ENO option to indicate support */
+	len = sizeof(*eno);
+	eno = tcp_opts_alloc(tc, ip, tcp, len);
+	if (!eno) {
+		xprintf(XP_ALWAYS, "No space for ENO\n");
+		tc->tc_state = STATE_DISABLED;
+
+		return DIVERT_ACCEPT;
+	}
+	eno->toe_kind = TCPOPT_ENO;
+	eno->toe_len  = len;
 
 	if (!retx)
 		generate_nonce(tc, tc->tc_crypt_pub->cp_n_c);
@@ -2142,12 +2155,26 @@ static int do_input_pkconf_sent(struct tc *tc, struct ip *ip,
 	struct tc_init2 *i2;
 	uint8_t kxs[1024];
 	int cipherlen;
+	struct tcpopt_eno *eno;
+
+	/* Check to see if the other side added ENO per
+	   Section 3.2 of draft-ietf-tcpinc-tcpeno-00. */
+	if (!(eno = find_opt(tcp, TCPOPT_ENO))) {
+		xprintf(XP_DEBUG, "No ENO option found in expected INIT1\n");
+		tc->tc_state = STATE_DISABLED;
+
+		return DIVERT_ACCEPT;
+	}
 
 	/* syn retransmission */
 	if (tcp->th_flags == TH_SYN)
 		return do_input_closed(tc, ip, tcp);
 
 	if (!process_init1(tc, ip, tcp, kxs, sizeof(kxs))) {
+		/* XXX. Per Section 3.2 of draft-ietf-tcpinc-tcpeno-00,
+		   you are supposed to tear down the connection.
+		   This is a bug.
+		*/
 		tc->tc_state = STATE_DISABLED;
 
 		return DIVERT_ACCEPT;

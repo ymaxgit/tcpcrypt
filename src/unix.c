@@ -90,3 +90,10 @@ void raw_inject(void *data, int len)
 void divert_cycle(void)
 {
 }
+
+#ifndef __DARWIN_UNIX03
+void divert_inject(void *data, int len)
+{
+	raw_inject(data, len);
+}
+#endif

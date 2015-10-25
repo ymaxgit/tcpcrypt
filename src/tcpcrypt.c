@@ -259,19 +259,11 @@ static void compute_nextk(struct tc *tc, struct stuff *out)
 static void compute_mk(struct tc *tc, struct stuff *out)
 {
 	int len = tc->tc_crypt_pub->cp_k_len;
-	unsigned char tag[2];
-	unsigned char app_support = 0;
-	int pos = tc->tc_role == ROLE_SERVER ? 1 : 0;
+	unsigned char tag = CONST_REKEY;
 
 	assert(len <= sizeof(out->s_data));
 
-	app_support |= (tc->tc_app_support & 1)	<< pos;
-	app_support |= (tc->tc_app_support >> 1) << (!pos);
-
-	tag[0] = CONST_REKEY;
-	tag[1] = app_support;
-
-	crypt_expand(tc->tc_crypt_pub->cp_hkdf, tag, sizeof(tag), out->s_data,
+	crypt_expand(tc->tc_crypt_pub->cp_hkdf, &tag, sizeof(tag), out->s_data,
 		     len);
 
 	out->s_len = len;
@@ -1057,7 +1049,6 @@ static int do_output_closed(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 		sopt = (struct tc_sess_opt*) p;
 
 		sopt->ts_opt = TC_RESUME | TC_OPT_VLEN;
-		sopt->ts_subopt = ts->ts_pub_spec;
 
 		assert(ts->ts_sid.s_len >= sizeof(sopt->ts_sid));
 		memcpy(&sopt->ts_sid, &ts->ts_sid.s_data, sizeof(sopt->ts_sid));
@@ -1322,7 +1313,8 @@ static int add_eno(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 static int do_output_pkconf_rcvd(struct tc *tc, struct ip *ip,
 				 struct tcphdr *tcp, int retx)
 {
-	int len, klen;
+	int len;
+	uint16_t klen;
 	struct tc_init1 *init1;
 	void *key;
 	uint8_t *p;
@@ -1336,26 +1328,26 @@ static int do_output_pkconf_rcvd(struct tc *tc, struct ip *ip,
 
 	klen = crypt_get_key(tc->tc_crypt_pub->cp_pub, &key);
 	len  = sizeof(*init1) 
+	       + tc->tc_ciphers_sym_len
 	       + tc->tc_nonce_len
-	       + klen
-	       + 1
-	       + tc->tc_ciphers_sym_len;
+	       + klen;
 
 	init1 = data_alloc(tc, ip, tcp, len, retx);
 
-	init1->i1_magic = htonl(TC_INIT1);
+	init1->i1_magic    = htonl(TC_INIT1);
+	init1->i1_len      = htonl(len);
+	init1->i1_nciphers = tc->tc_ciphers_sym_len;
+
 	p = init1->i1_data;
+
+	memcpy(p, tc->tc_ciphers_sym, tc->tc_ciphers_sym_len);
+	p += tc->tc_ciphers_sym_len;
 
 	memcpy(p, tc->tc_nonce, tc->tc_nonce_len);
 	p += tc->tc_nonce_len;
 
 	memcpy(p, key, klen);
 	p += klen;
-
-	*p++ = tc->tc_ciphers_sym_len;
-
-	memcpy(p, tc->tc_ciphers_sym, tc->tc_ciphers_sym_len);
-	p += tc->tc_ciphers_sym_len;
 
 	tc->tc_state = STATE_INIT1_SENT;
 	tc->tc_role  = ROLE_CLIENT;
@@ -1520,11 +1512,10 @@ static int encrypt_and_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	/* Prepare flags */
 	flags = (struct tc_flags *) record->tr_data;
 	flags->tf_flags = 0;
-	flags->tf_flags |= (tcp->th_flags & TH_FIN ? 1 : 0) << 0;
-	flags->tf_flags |= (tcp->th_flags & TH_RST ? 1 : 0) << 1;
-	flags->tf_flags |= (tcp->th_flags & TH_URG ? 1 : 0) << 2;
+	flags->tf_flags |= tcp->th_flags & TH_FIN ? TCF_FIN : 0;
+	flags->tf_flags |= tcp->th_flags & TH_URG ? TCF_URG : 0;
 
-	if (tcp->th_flags & TH_URG)
+	if (flags->tf_flags & TCF_URG)
 		flags->tf_urp[0] = tcp->th_urp;
 
 	mac = data + tcp_data_len(ip, tcp) - maclen;
@@ -2202,7 +2193,6 @@ static int process_init1(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 	int dlen;
 	uint8_t *nonce;
 	int nonce_len;
-	int num_ciphers;
 	void *key;
 	int klen;
 	int cl;
@@ -2220,34 +2210,26 @@ static int process_init1(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 	if (!select_pkey(tc, &tc->tc_cipher_pkey))
 		return bad_packet("init1: bad public key");
 
-	klen = crypt_get_key(tc->tc_crypt_pub->cp_pub, &key);
-
+	klen 	  = crypt_get_key(tc->tc_crypt_pub->cp_pub, &key);
 	nonce_len = tc->tc_crypt_pub->cp_n_c;
+	len 	  = sizeof(*i1) + i1->i1_nciphers + nonce_len + klen;
 
-	p   = i1->i1_data + nonce_len + klen;
-	len = (unsigned long) p - (unsigned long) i1;
-
-	if (len >= dlen)
+	/* strict len for now */
+	if (len != dlen || len != ntohl(i1->i1_len))
 	    	return bad_packet("bad init1 len");
-	
-	num_ciphers = *p++;
 
-	len += 1 + num_ciphers;
-
-	if (len != dlen)
-	    	return bad_packet("bad init1 lenn");
-
-	if (!negotiate_sym_cipher(tc, (struct tc_scipher *) p, num_ciphers))
+	p = i1->i1_data;
+	if (!negotiate_sym_cipher(tc, (struct tc_scipher *) p, i1->i1_nciphers))
 		return bad_packet("init1: can't negotiate");
 
-	nonce = i1->i1_data;
+	nonce = p + i1->i1_nciphers;
 	key   = nonce + nonce_len;
 
 	profile_add(1, "pre pkey set key");
 
 	/* figure out key len */
 	if (crypt_set_key(tc->tc_crypt_pub->cp_pub, key, klen) == -1)
-		return 0;
+		return bad_packet("init1: bad pubkey");
 
 	profile_add(1, "pkey set key");
 
@@ -2345,13 +2327,14 @@ static int do_input_pkconf_sent(struct tc *tc, struct ip *ip,
 	ip2 = (struct ip*) buf;
 	tcp2 = (struct tcphdr*) (ip2 + 1);
 
-	len = sizeof(*i2) + cipherlen + 1;
+	len = sizeof(*i2) + cipherlen;
 	i2  = data_alloc(tc, ip2, tcp2, len, 0);
 
-	i2->i2_magic   = htonl(TC_INIT2);
-	memcpy(i2->i2_data, kxs, cipherlen);
+	i2->i2_magic  = htonl(TC_INIT2);
+	i2->i2_len    = htonl(len);
+	i2->i2_cipher = tc->tc_cipher_sym.sc_algo;
 
-	i2->i2_data[cipherlen] = tc->tc_cipher_sym.sc_algo;
+	memcpy(i2->i2_data, kxs, cipherlen);
 
 	if (_conf.cf_rsa_client_hack)
 		memcpy(i2->i2_data, tc->tc_nonce, tc->tc_nonce_len);
@@ -2442,10 +2425,10 @@ static int process_init2(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 
 	nlen = tc->tc_crypt_pub->cp_cipher_len;
 
-	if (sizeof(*i2) + nlen + 1 > len)
+	if (sizeof(*i2) + nlen > len || ntohl(i2->i2_len) > len)
 		return bad_packet("init2: bad len");
 
-	if (!select_sym(tc, (struct tc_scipher*) (i2->i2_data + nlen)))
+	if (!select_sym(tc, (struct tc_scipher*) (&i2->i2_cipher)))
 		return bad_packet("init2: select_sym()");
 
 	if (len > sizeof(tc->tc_init2))
@@ -3148,7 +3131,9 @@ static void rdr_local_handler(struct fd *fd)
 		return;
 	}
 
+	/* XXX we should really fix this - shouldn't get here randomly */
 	xprintf(XP_ALWAYS, "unhandled RDR %d\n", tc->tc_state);
+	kill_rdr(tc);
 }
 
 static void rdr_remote_handler(struct fd *fd)

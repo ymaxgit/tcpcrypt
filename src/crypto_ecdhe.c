@@ -30,9 +30,17 @@ struct ecdhe_priv {
 static int set_peer_key(struct crypt *c, void *key, int len)
 {
         struct ecdhe_priv *p = crypt_priv(c);
-
 	EC_KEY *k;
-	const unsigned char *kk = key;
+	uint16_t *klen = key;
+	const unsigned char *kk = (unsigned char*) (klen + 1);
+
+	if (len < sizeof(*klen))
+		return -1;
+
+	if (ntohs(*klen) != len)
+		return -1;
+
+	len -= sizeof(*klen);
 
 	k = EC_KEY_new_by_curve_name(p->ec_nid);
 	assert(k);
@@ -127,6 +135,7 @@ static struct crypt *crypt_ECDHE_new(int nid)
         struct ecdhe_priv *r;
         struct crypt *c;
 	unsigned char *p;
+	uint16_t *len;
 
         c = crypt_init(sizeof(*r));
 	c->c_destroy     = ecdhe_destroy;
@@ -149,8 +158,13 @@ static struct crypt *crypt_ECDHE_new(int nid)
 	r->ec_bin_len = i2o_ECPublicKey(r->ec_key, NULL);
 	assert(r->ec_bin_len > 0);
 
-	r->ec_bin = xmalloc(r->ec_bin_len);
-	p = r->ec_bin;
+	/* prefix it with length */
+	r->ec_bin_len += sizeof(*len);
+	len = r->ec_bin = xmalloc(r->ec_bin_len);
+
+	*len++ = htons(r->ec_bin_len);
+
+	p = (unsigned char*) len;
 	i2o_ECPublicKey(r->ec_key, &p);
 
         return c;

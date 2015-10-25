@@ -53,12 +53,12 @@ static struct crypt_pub *ECDHE_HKDF_new(struct crypt*(*ctr)(void), int klen)
 
 static struct crypt_pub *ECDHE256_HKDF_new(void)
 {
-	return ECDHE_HKDF_new(crypt_ECDHE256_new, 65);
+	return ECDHE_HKDF_new(crypt_ECDHE256_new, 65 + 2);
 }
 
 static struct crypt_pub *ECDHE521_HKDF_new(void)
 {
-	return ECDHE_HKDF_new(crypt_ECDHE521_new, 133);
+	return ECDHE_HKDF_new(crypt_ECDHE521_new, 133 + 2);
 }
 
 static struct crypt_sym *AES_GCM_new(struct crypt*(*ctr)(void), int mlen,

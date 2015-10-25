@@ -121,16 +121,16 @@ struct tc_sess {
 };
 
 struct tc_sid {
-        uint8_t ts_sid[9];
+        uint8_t ts_sid[8];
 } __attribute__ ((__packed__));
 
 struct tc_sess_opt {
 	uint8_t	      ts_opt;
-	uint8_t	      ts_subopt;
 	struct tc_sid ts_sid;
 } __attribute__ ((__packed__));
 
-#define TCF_URG 0x4
+#define TCF_FIN 0x1
+#define TCF_URG 0x2
 
 struct tc_flags {
 	uint8_t		tf_flags;
@@ -339,11 +339,15 @@ enum {
 
 struct tc_init1 {
 	uint32_t		i1_magic;
+	uint32_t		i1_len;
+	uint8_t			i1_nciphers;
 	uint8_t			i1_data[0];
 } __attribute__ ((__packed__));
 
 struct tc_init2 {
 	uint32_t		i2_magic;
+	uint32_t		i2_len;
+	uint8_t			i2_cipher;
 	uint8_t			i2_data[0];
 } __attribute__ ((__packed__));
 

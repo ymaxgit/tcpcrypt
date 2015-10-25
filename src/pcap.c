@@ -134,7 +134,7 @@ int divert_open(int port, divert_cb cb)
 	if (!p)
 		errx(1, "pcap_create(): %s", buf);
 
-//	pcap_set_want_pktap(p, 1);
+	pcap_set_want_pktap(p, 1);
 	pcap_set_snaplen(p, 2048);
 	pcap_set_timeout(p, 1);
 	pcap_activate(p);

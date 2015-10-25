@@ -64,7 +64,8 @@ else
   os_linux=0
 fi
 AM_CONDITIONAL(OS_LINUX, [test "$os_linux" -eq 1])
-AM_CONDITIONAL(OS_BSD, [echo $host_os | grep -E 'darwin|freebsd'])
+AM_CONDITIONAL(OS_BSD, [echo $host_os | grep freebsd])
+AM_CONDITIONAL(OS_OSX, [echo $host_os | grep darwin])
 AM_CONDITIONAL(OS_MINGW, [echo $host_os | grep mingw])
 
 AS_IF([test "$os_linux" -eq 1],
@@ -111,6 +112,7 @@ AC_CHECK_LIB([crypto], [EVP_OpenInit], [crypto_LDADD="-lcrypto"])
 AC_CHECK_LIB([netfilter_queue], [nfq_open], [tcpcryptd_LDADD="-lnetfilter_queue $tcpcryptd_LDADD"])
 
 AC_CHECK_LIB([nfnetlink], [nfnl_rcvbufsiz], [tcpcryptd_LDADD="-lnfnetlink $tcpcryptd_LDADD"])
+AC_CHECK_LIB([pcap], [pcap_open_live], [tcpcryptd_LDADD="-lpcap $tcpcryptd_LDADD"])
 AC_CHECK_LIB([pthread], [pthread_create])
 AC_CHECK_LIB([wsock32], [bind]) # TODO: find symbol name
 AC_CHECK_LIB([iphlpapi], [GetAdaptersInfo]) # TODO: find symbol name

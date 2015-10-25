@@ -43,7 +43,7 @@ void open_raw()
                 err(1, "IP_HDRINCL");
 }
 
-void divert_inject(void *data, int len)
+void raw_inject(void *data, int len)
 {
         int rc;
         struct ip *ip = data;
@@ -52,6 +52,8 @@ void divert_inject(void *data, int len)
 
 	if (_s == 0)
 		open_raw();
+
+	memset(&s_in, 0, sizeof(s_in));
 
         s_in.sin_family = PF_INET;
         s_in.sin_addr   = ip->ip_dst;
@@ -68,6 +70,7 @@ void divert_inject(void *data, int len)
 #endif
 #ifdef HO_LEN
 	ip->ip_len = ntohs(ip->ip_len);
+	ip->ip_off = ntohs(ip->ip_off);
 #endif
 
         rc = sendto(_s, data, len, 0, (struct sockaddr*) &s_in,
@@ -80,6 +83,7 @@ void divert_inject(void *data, int len)
 
 #ifdef HO_LEN
 	ip->ip_len = htons(ip->ip_len);
+	ip->ip_off = htons(ip->ip_off);
 #endif
 }
 

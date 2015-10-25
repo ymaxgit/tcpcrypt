@@ -45,6 +45,12 @@ struct tc_scipher {
 };
 
 enum {
+	STATE_RDR_NONE = 0,
+	STATE_RDR_LOCAL,
+	STATE_RDR_REMOTE,
+};
+
+enum {
 	STATE_CLOSED		=  0,
 	STATE_HELLO_SENT,
 	STATE_HELLO_RCVD,
@@ -60,6 +66,7 @@ enum {
 	STATE_NEXTK2_SENT,
 	STATE_REKEY_SENT,
 	STATE_REKEY_RCVD,
+	STATE_RDR_PLAIN		= 15,
 };
 
 enum {
@@ -243,8 +250,8 @@ struct tc {
 	int			tc_optlen;
 	struct conn		*tc_conn;
 	int			tc_app_support;
-	int			tc_isn;
-	int			tc_isn_peer;
+	uint64_t		tc_isn;
+	uint64_t		tc_isn_peer;
 	unsigned char		tc_init1[1500];
 	int			tc_init1_len;
 	unsigned char		tc_init2[1500];
@@ -253,6 +260,16 @@ struct tc {
 	int			tc_pms_len;
 	unsigned char		tc_eno[1500];
 	int			tc_eno_len;
+	int			tc_rdr_state;
+	int			tc_rdr_connected;
+	struct fd		*tc_rdr_fd;
+	unsigned char		tc_rdr_buf[1500];
+	int			tc_rdr_len;
+	struct tc		*tc_rdr_peer;
+	struct sockaddr_in	tc_rdr_addr;
+	uint64_t		tc_rdr_tx;
+	uint64_t		tc_rdr_rx;
+	int			tc_rdr_inbound;
 };
 
 enum {  

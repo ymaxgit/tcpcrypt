@@ -658,7 +658,7 @@ static void handle_syn(struct ip *ip, struct tcphdr *tcp)
 	int local = 0;
 
 	/* XXX */
-	if (ip->ip_dst.s_addr == inet_addr("172.16.145.1"))
+	if (ip->ip_dst.s_addr == inet_addr("172.16.9.1"))
 		local = 1;
 	else
 		local = 0;
@@ -771,9 +771,9 @@ static void setup_pcap(void)
 	if (!p)
 		errx(1, "pcap_open_live(): %s", buf);
 
-	pcap_set_want_pktap(p, 1);
+//	pcap_set_want_pktap(p, 1);
 	pcap_set_snaplen(p, 2048);
-	pcap_set_timeout(p, 1000);
+	pcap_set_timeout(p, 1);
 	pcap_activate(p);
 
 	if (pcap_set_datalink(p, DLT_PKTAP) == -1) {
@@ -831,7 +831,7 @@ static void setup_redirect(void)
 
 	s_in.sin_family      = PF_INET;
 	s_in.sin_port        = htons(REDIRECT_PORT);
-	s_in.sin_addr.s_addr = inet_addr("127.0.0.1");
+	s_in.sin_addr.s_addr = INADDR_ANY;
 
 	if (bind(s, (struct sockaddr*) &s_in, sizeof(s_in)) == -1)
 		err(1, "bind()");

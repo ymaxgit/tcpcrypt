@@ -1,6 +1,8 @@
 #ifndef __TCPCRYPT_TCPCRYPTD_H__
 #define __TCPCRYPT_TCPCRYPTD_H__
 
+#define REDIRECT_PORT 65530
+
 #define MAX_PARAM	12
 
 enum {
@@ -56,10 +58,29 @@ struct conf {
 	int		cf_rsa_client_hack;
 	int		cf_disable_timers;
 	int		cf_disable_network_test;
+	int		cf_rdr;
 	const char	*cf_test_server;
 	const char	*cf_random_path;
 	const char	*cf_jail_dir;
 	const char	*cf_jail_user;
+};
+
+struct fd;
+typedef void (*fd_cb)(struct fd *fd);
+
+enum {
+	FD_IDLE = 0,
+	FD_READ,
+	FD_WRITE,
+	FD_DEAD
+};
+
+struct fd {
+	int	  fd_fd;
+	fd_cb	  fd_cb;
+	int	  fd_state;
+	void	  *fd_priv;
+	struct fd *fd_next;
 };
 
 extern struct conf _conf;
@@ -68,6 +89,7 @@ typedef void (*timer_cb)(void *a);
 typedef int  (*packet_hook)(int rc, void *packet, int len, int flags); 
 
 extern void *add_timer(unsigned int usec, timer_cb cb, void *arg);
+extern struct fd *add_fd(int fd, fd_cb cb);
 extern void clear_timer(void *timer);
 extern void xprintf(int level, char *fmt, ...);
 extern void hexdump(void *p, int len);

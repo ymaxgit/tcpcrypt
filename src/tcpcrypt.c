@@ -5,6 +5,8 @@
 #include <assert.h>
 #include <errno.h>
 #include <time.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "inc.h"
 #include "util.h"
@@ -182,6 +184,25 @@ static void crypto_free_keyset(struct tc *tc, struct tc_keyset *ks)
 		crypt_sym_destroy(ks->tc_alg_rx);
 }
 
+static void kill_rdr(struct tc *tc)
+{
+	struct fd *fd = tc->tc_rdr_fd;
+	struct tc *peer = tc->tc_rdr_peer;
+
+	tc->tc_state = STATE_DISABLED;
+
+	if (fd) {
+		fd->fd_state = FD_DEAD;
+		close(fd->fd_fd);
+	}
+
+	if (peer) {
+		assert(peer->tc_rdr_peer = tc);
+		peer->tc_rdr_peer = NULL;
+		kill_rdr(peer);
+	}
+}
+
 static void tc_finish(struct tc *tc)
 {
 	if (tc->tc_crypt_pub)
@@ -200,6 +221,8 @@ static void tc_finish(struct tc *tc)
 
 	if (tc->tc_sess)
 		tc->tc_sess->ts_used = 0;
+
+	kill_rdr(tc);
 }
 
 static struct tc *tc_dup(struct tc *tc)
@@ -504,6 +527,19 @@ static void sockopt_clear(unsigned short port)
 	_sockopts[port] = NULL;
 }
 
+static void do_inject_ip(struct ip *ip)
+{
+	divert_inject(ip, ntohs(ip->ip_len));
+}
+
+static void inject_ip(struct ip *ip)
+{
+	if (_conf.cf_rdr)
+		return;
+
+	do_inject_ip(ip);
+}
+
 static void retransmit(void *a)
 {
 	struct tc *tc = a;
@@ -520,7 +556,7 @@ static void retransmit(void *a)
 
 	ip = (struct ip*) tc->tc_retransmit->r_packet;
 
-	divert_inject(ip, ntohs(ip->ip_len));
+	inject_ip(ip);
 
 	/* XXX decay */
 	tc->tc_retransmit->r_timer = add_timer(tc->tc_rto, retransmit, tc);
@@ -543,21 +579,23 @@ static void add_connection(struct conn *c)
 	head->c_next = c;
 }
 
-static struct tc *new_connection(struct ip *ip, struct tcphdr *tcp, int flags)
+static struct tc *do_new_connection(uint32_t saddr, uint16_t sport,
+				    uint32_t daddr, uint16_t dport,
+				    int in)
 {
 	struct tc *tc;
 	struct conn *c;
-	int idx = flags & DF_IN ? 1 : 0;
+	int idx = in ? 1 : 0;
 
 	c = get_connection();
 	assert(c);
 	profile_add(2, "alloc connection");
 
 	memset(c, 0, sizeof(*c));
-	c->c_addr[idx].sin_addr.s_addr  = ip->ip_src.s_addr;
-	c->c_addr[idx].sin_port         = tcp->th_sport;
-	c->c_addr[!idx].sin_addr.s_addr = ip->ip_dst.s_addr;
-	c->c_addr[!idx].sin_port        = tcp->th_dport;
+	c->c_addr[idx].sin_addr.s_addr  = saddr;
+	c->c_addr[idx].sin_port         = sport;
+	c->c_addr[!idx].sin_addr.s_addr = daddr;
+	c->c_addr[!idx].sin_port        = dport;
 	profile_add(2, "setup connection");
 
 	tc = sockopt_find_port(c->c_addr[0].sin_port);
@@ -574,7 +612,7 @@ static struct tc *new_connection(struct ip *ip, struct tcphdr *tcp, int flags)
 		/* For servers, we gotta duplicate options on child sockets.
 		 * For clients, we just steal it.
 		 */
-		if (flags & DF_IN)
+		if (in)
 			tc = tc_dup(tc);
 		else
 			sockopt_clear(c->c_addr[0].sin_port);
@@ -589,6 +627,13 @@ static struct tc *new_connection(struct ip *ip, struct tcphdr *tcp, int flags)
 	add_connection(c);	
 
 	return tc;
+}
+
+static struct tc *new_connection(struct ip *ip, struct tcphdr *tcp, int flags)
+{
+	return do_new_connection(ip->ip_src.s_addr, tcp->th_sport,
+				 ip->ip_dst.s_addr, tcp->th_dport,
+				 flags & DF_IN);
 }
 
 static void do_remove_connection(struct tc *tc, struct conn *prev)
@@ -886,6 +931,78 @@ static void set_eno_transcript(struct tc *tc, struct tcphdr *tcp)
 	tc->tc_eno_len += 2;
 }
 
+struct tcphdr *get_tcp(struct ip *ip)
+{
+        return (struct tcphdr*) ((unsigned long) ip + ip->ip_hl * 4);
+}
+
+static void send_rst(struct tc *tc)
+{
+        struct ip *ip = (struct ip*) tc->tc_rdr_buf;
+        struct tcphdr *tcp = (struct tcphdr*) get_tcp(ip);
+        struct in_addr addr;
+        int port;
+
+        addr.s_addr = ip->ip_src.s_addr;
+        ip->ip_src.s_addr = ip->ip_dst.s_addr;
+        ip->ip_dst.s_addr = addr.s_addr;
+
+        port = tcp->th_sport;
+        tcp->th_sport = tcp->th_dport;
+        tcp->th_dport = port;
+
+        tcp->th_flags = TH_RST | TH_ACK;
+        tcp->th_ack   = htonl(ntohl(tcp->th_seq) + 1);
+        tcp->th_seq   = htonl(0);
+
+	checksum_packet(tc, ip, tcp);
+
+	xprintf(XP_ALWAYS, "Sending RST\n");
+
+        do_inject_ip(ip);
+}
+
+static void rdr_check_connect(struct tc *tc)
+{
+        int e;
+        socklen_t len = sizeof(e);
+	struct fd *fd = tc->tc_rdr_fd;
+        struct ip *ip = (struct ip*) tc->tc_rdr_buf;
+
+        if (getsockopt(fd->fd_fd, SOL_SOCKET, SO_ERROR, &e, &len) == -1) {
+                perror("getsockopt()");
+		kill_rdr(tc);
+                return;
+        }
+
+        if (e != 0) {
+                if (e == ECONNREFUSED)
+                        send_rst(tc);
+
+		kill_rdr(tc);
+                return;
+        }
+
+	xprintf(XP_NOISY, "Connected %p %s\n",
+		tc, tc->tc_rdr_inbound ?  "inbound" : "");
+
+	tc->tc_rdr_connected = 1;
+	fd->fd_state = FD_IDLE;
+
+	/* we need to manually redirect... */
+	if (tc->tc_rdr_inbound) {
+                /* we need to manually redirect... */
+                struct tcphdr *tcp = get_tcp(ip);
+
+                ip->ip_dst.s_addr = inet_addr("127.0.0.1");
+                tcp->th_dport = htons(REDIRECT_PORT);
+                checksum_packet(tc, ip, tcp);
+	}
+
+	/* inject the local SYN so that user connects to proxy */
+        do_inject_ip(ip);
+}
+
 static int do_output_closed(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
 	struct tc_sess *ts = tc->tc_sess;
@@ -985,9 +1102,11 @@ static int do_output_hello_rcvd(struct tc *tc, struct ip *ip,
 	if (app_support)
 		eno->toe_opts[sizeof(tc->tc_cipher_pkey)] = app_support << 1;
 
-	tc->tc_state = STATE_PKCONF_SENT;
+	/* don't set on retransmit.  XXX check if same */
+	if (tc->tc_state != STATE_PKCONF_SENT)
+		set_eno_transcript(tc, tcp);
 
-	set_eno_transcript(tc, tcp);
+	tc->tc_state = STATE_PKCONF_SENT;
 
 	return DIVERT_MODIFY;
 }
@@ -1142,6 +1261,13 @@ static void *data_alloc(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 	int hl     = (ip->ip_hl << 2) + (tcp->th_off << 2);
 	void *p;
 
+	if (_conf.cf_rdr) {
+		assert(len < sizeof(tc->tc_rdr_buf));
+		tc->tc_rdr_len = len;
+
+		return tc->tc_rdr_buf;
+	}
+
 	assert(totlen == hl);
 	p = (char*) tcp + (tcp->th_off << 2);
 
@@ -1176,26 +1302,34 @@ static void generate_nonce(struct tc *tc, int len)
 	profile_add(1, "generated nonce out");
 }
 
+static int add_eno(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+{
+	struct tcpopt_eno *eno;
+	int len = sizeof(*eno);
+
+	eno = tcp_opts_alloc(tc, ip, tcp, len);
+	if (!eno) {
+		xprintf(XP_ALWAYS, "No space for ENO\n");
+		tc->tc_state = STATE_DISABLED;
+		return -1;
+	}
+	eno->toe_kind = TCPOPT_ENO;
+	eno->toe_len  = len;
+
+	return 0;
+}
+
 static int do_output_pkconf_rcvd(struct tc *tc, struct ip *ip,
 				 struct tcphdr *tcp, int retx)
 {
 	int len, klen;
 	struct tc_init1 *init1;
 	void *key;
-	struct tcpopt_eno *eno;
 	uint8_t *p;
 
 	/* Add the minimal ENO option to indicate support */
-	len = sizeof(*eno);
-	eno = tcp_opts_alloc(tc, ip, tcp, len);
-	if (!eno) {
-		xprintf(XP_ALWAYS, "No space for ENO\n");
-		tc->tc_state = STATE_DISABLED;
-
+	if (add_eno(tc, ip, tcp) == -1)
 		return DIVERT_ACCEPT;
-	}
-	eno->toe_kind = TCPOPT_ENO;
-	eno->toe_len  = len;
 
 	if (!retx)
 		generate_nonce(tc, tc->tc_crypt_pub->cp_n_c);
@@ -1230,6 +1364,8 @@ static int do_output_pkconf_rcvd(struct tc *tc, struct ip *ip,
 
 	memcpy(tc->tc_init1, init1, len);
 	tc->tc_init1_len = len;
+
+	tc->tc_isn = ntohl(tcp->th_seq) + len;
 
 	return DIVERT_MODIFY;
 }
@@ -1285,10 +1421,19 @@ static int do_output_init2_sent(struct tc *tc, struct ip *ip,
 	return DIVERT_ACCEPT;
 }
 
-static void *get_iv(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+static void *get_iv(struct tc *tc, struct ip *ip, struct tcphdr *tcp, int enc)
 {
 	static uint64_t seq;
+	uint64_t isn = enc ? tc->tc_isn : tc->tc_isn_peer;
 	void *iv = NULL;
+
+	/* XXX byte order */
+
+	if (_conf.cf_rdr) {
+		seq = enc ? tc->tc_rdr_tx : tc->tc_rdr_rx;
+
+		return &seq;
+	}
 
 	switch (tc->tc_sym_ivmode) {
 	case IVMODE_CRYPT:
@@ -1296,9 +1441,8 @@ static void *get_iv(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 		break;
 
 	case IVMODE_SEQ:
-		seq   = htonl(tc->tc_seq >> 32);
-		seq <<= 32;
-		seq  |= tcp->th_seq;
+		/* XXX WRAP */
+		seq = htonl(tcp->th_seq) - isn;
 		iv = &seq;
 		break;
 
@@ -1366,7 +1510,7 @@ static int encrypt_and_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	if (add_data(tc, ip, tcp, head, maclen))
 		return -1;
 
-	iv = get_iv(tc, ip, tcp);
+	iv = get_iv(tc, ip, tcp, 1);
 
 	/* Prepare TLV */
 	record = tcp_data(tcp);
@@ -1455,6 +1599,16 @@ static int do_output_encrypting(struct tc *tc, struct ip *ip,
 		return DIVERT_DROP;
 	}
 
+	/* We're retransmitting INIT2 */
+	if (tc->tc_retransmit) {
+		/* XXX */
+		ip  = (struct ip*) tc->tc_retransmit->r_packet;
+		tcp = (struct tcphdr*) (ip + 1);
+		assert(is_init(ip, tcp, TC_INIT2));
+
+		return DIVERT_ACCEPT;
+	}
+
 	assert(!(tcp->th_flags & TH_SYN));
 
 	tc->tc_key_active = &tc->tc_key_current;
@@ -1466,9 +1620,6 @@ static int do_output_encrypting(struct tc *tc, struct ip *ip,
 
 		return DIVERT_DROP;
 	}
-
-	/* XXX retransmissions.  approx. */
-	tc->tc_sent_bytes += tcp_data_len(ip, tcp);
 
 	return DIVERT_MODIFY;
 }
@@ -1494,7 +1645,7 @@ static int do_tcp_output(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	int rc = DIVERT_ACCEPT;
 
 	if (tcp->th_flags & TH_SYN)
-		tc->tc_isn = ntohl(tcp->th_seq);
+		tc->tc_isn = ntohl(tcp->th_seq) + 1;
 
 	if (tcp->th_flags == TH_SYN) {
 		if (tc->tc_tcp_state == TCPSTATE_LASTACK) {
@@ -1881,6 +2032,9 @@ static void *alloc_retransmit(struct tc *tc)
 	struct retransmit *r;
 	int len;
 
+	if (_conf.cf_rdr)
+		return &tc->tc_rdr_buf[512]; /* XXX */
+
 	assert(!tc->tc_retransmit);
 
 	len = sizeof(*r) + tc->tc_mtu;
@@ -2131,6 +2285,8 @@ static int process_init1(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 
 	tc->tc_state = STATE_INIT1_RCVD;
 
+	tc->tc_isn_peer = ntohl(tcp->th_seq) + dlen;
+
 	return 1;
 }
 
@@ -2156,10 +2312,11 @@ static int do_input_pkconf_sent(struct tc *tc, struct ip *ip,
 	uint8_t kxs[1024];
 	int cipherlen;
 	struct tcpopt_eno *eno;
+	int rdr = _conf.cf_rdr;
 
 	/* Check to see if the other side added ENO per
 	   Section 3.2 of draft-ietf-tcpinc-tcpeno-00. */
-	if (!(eno = find_opt(tcp, TCPOPT_ENO))) {
+	if (!rdr && !(eno = find_opt(tcp, TCPOPT_ENO))) {
 		xprintf(XP_DEBUG, "No ENO option found in expected INIT1\n");
 		tc->tc_state = STATE_DISABLED;
 
@@ -2204,8 +2361,11 @@ static int do_input_pkconf_sent(struct tc *tc, struct ip *ip,
 	memcpy(tc->tc_init2, i2, len);
 	tc->tc_init2_len = len;
 
+	tc->tc_isn = ntohl(tcp2->th_seq) + len;
+
 	checksum_packet(tc, ip2, tcp2);
-	divert_inject(ip2, ntohs(ip2->ip_len));
+
+	inject_ip(ip2);
 
 	tc->tc_state = STATE_INIT2_SENT;
 
@@ -2294,6 +2454,8 @@ static int process_init2(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	memcpy(tc->tc_init2, i2, len);
 	tc->tc_init2_len = len;
 
+	tc->tc_isn_peer = ntohl(tcp->th_seq) + len;
+
 	nonce = i2->i2_data;
 	nlen  = crypt_decrypt(tc->tc_crypt_pub->cp_pub, NULL, nonce, nlen);
 
@@ -2312,6 +2474,9 @@ static void ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	struct ip *ip2;
 	struct tcphdr *tcp2;
 
+	if (_conf.cf_rdr)
+		return;
+
 	ip2  = (struct ip*) buf;
 	tcp2 = (struct tcphdr*) (ip2 + 1);
 
@@ -2322,15 +2487,19 @@ static void ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	tcp2->th_ack = htonl(ntohl(tcp2->th_ack) - tc->tc_rseq_off);
 
 	checksum_packet(tc, ip2, tcp2);
-	divert_inject(ip2, ntohs(ip2->ip_len));
+	do_inject_ip(ip2);
 }
 
 static int do_input_init1_sent(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
-	int dlen;
+	int dlen = tcp_data_len(ip, tcp);
 
 	/* XXX syn ack re-TX - check pkconf */
 	if (tcp->th_flags == (TH_SYN | TH_ACK))
+		return DIVERT_ACCEPT;
+
+	/* pure ack after connect */
+	if (dlen == 0)
 		return DIVERT_ACCEPT;
 
 	if (!process_init2(tc, ip, tcp)) {
@@ -2431,7 +2600,7 @@ static int check_mac_and_decrypt(struct tc *tc, struct ip *ip,
 	struct crypt *c = tc->tc_key_active->tc_alg_rx->cs_cipher;
 	uint8_t *data = (uint8_t*) (record + 1);
 	uint8_t *mac = ((uint8_t*) record) + len - maclen;
-	void *iv = get_iv(tc, ip, tcp);
+	void *iv = get_iv(tc, ip, tcp, 0);
 	int dlen;
 
 	if (len == 0) {
@@ -2614,7 +2783,7 @@ static int tcp_input_pre(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	int rc = DIVERT_ACCEPT;
 
 	if (tcp->th_flags & TH_SYN)
-		tc->tc_isn_peer = ntohl(tcp->th_seq);
+		tc->tc_isn_peer = ntohl(tcp->th_seq) + 1;
 
 	if (tcp->th_flags == TH_SYN && tc->tc_tcp_state == TCPSTATE_LASTACK) {
 		tc_finish(tc);
@@ -2824,6 +2993,425 @@ static int do_input(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	return rc;
 }
 
+static void fake_ip_tcp(struct ip *ip, struct tcphdr *tcp, int len)
+{
+	int hl = sizeof(*ip) + sizeof(*tcp);
+
+	memset(ip, 0, hl);
+
+	ip->ip_hl     = sizeof(*ip) / 4;
+	ip->ip_len    = htons(len + hl);
+
+	tcp->th_flags = 0;
+	tcp->th_off   = sizeof(*tcp) / 4;
+}
+
+static void proxy_connection(struct tc *tc)
+{
+        unsigned char buf[4096];
+	struct ip *ip = (struct ip *) buf;
+	struct tcphdr *tcp = (struct tcphdr*) (ip + 1);
+	unsigned char *p = (unsigned char*) (tcp + 1);
+        int rc;
+	struct tc *peer = tc->tc_rdr_peer;
+	struct tc *enc = NULL;
+	int out = tc->tc_rdr_state == STATE_RDR_LOCAL;
+
+        if ((rc = read(tc->tc_rdr_fd->fd_fd, p, sizeof(buf) - 256)) <= 0) {
+                kill_rdr(tc);
+                return;
+        }
+
+	if (tc->tc_state == STATE_ENCRYPTING)
+		enc = tc;
+	else if (peer->tc_state == STATE_ENCRYPTING)
+		enc = peer;
+
+	/* XXX fix variables / state */
+	if (peer->tc_rdr_inbound || tc->tc_rdr_inbound)
+		out = !out;
+
+	/* XXX */
+	fake_ip_tcp(ip, tcp, rc);
+
+	if (enc) {
+		if (out) {
+			rc = do_output_encrypting(enc, ip, tcp);
+			rc = tcp_data_len(ip, tcp);
+			enc->tc_rdr_tx += rc;
+		} else {
+			if (do_input_encrypting(enc, ip, tcp) == DIVERT_DROP)
+				return;
+
+			enc->tc_rdr_rx += rc;
+			rc = tcp_data_len(ip, tcp);
+		}
+	}
+
+        /* XXX assuming non-blocking write */
+        if (write(peer->tc_rdr_fd->fd_fd, p, rc) != rc) {
+                kill_rdr(tc);
+                return;
+        }
+}
+
+static void rdr_handshake_complete(struct tc *tc)
+{
+	int tos = 0;
+
+	/* stop intercepting handshake - all ENO opts have been set */
+	if (setsockopt(tc->tc_rdr_fd->fd_fd, IPPROTO_IP, IP_TOS, &tos,
+		       sizeof(tos)) == -1) {
+	    perror("setsockopt(IP_TOS)");
+	    kill_rdr(tc);
+	    return;
+	}
+}
+
+static void rdr_process_init(struct tc *tc)
+{
+	unsigned char buf[2048];
+	int len;
+	struct ip *ip = (struct ip *) buf;
+	struct tcphdr *tcp = (struct tcphdr*) (ip + 1);
+	int rc;
+	struct fd *fd = tc->tc_rdr_fd;
+
+	len = read(fd->fd_fd, &buf[40], sizeof(buf) - 40);
+	if (len <= 0) {
+		kill_rdr(tc);
+		return;
+	}
+
+	/* XXX */
+	fake_ip_tcp(ip, tcp, len);
+
+	switch (tc->tc_state) {
+	/* outbound connections */
+	case STATE_INIT1_SENT:
+		rc = do_input_init1_sent(tc, ip, tcp);
+
+		rdr_handshake_complete(tc);
+		break;
+
+	/* inbound connections */
+	case STATE_PKCONF_SENT:
+		/* XXX sniff ENO */
+		if (is_init(ip, tcp, TC_INIT1)) {
+			add_eno(tc, ip, tcp);
+		} else {
+			tc->tc_state = STATE_DISABLED;
+			return;
+		}
+
+		do_input_pkconf_sent(tc, ip, tcp);
+		if (tc->tc_state != STATE_INIT2_SENT)
+			goto __kill_rdr;
+
+		if (write(fd->fd_fd, tc->tc_rdr_buf, tc->tc_rdr_len)
+			  != tc->tc_rdr_len)
+			goto __kill_rdr;
+
+		enable_encryption(tc);
+		break;
+	}
+
+	return;
+__kill_rdr:
+	kill_rdr(tc);
+	return;
+}
+
+static void rdr_local_handler(struct fd *fd)
+{
+	struct tc *tc = fd->fd_priv;
+	struct tc *peer = tc->tc_rdr_peer;
+
+	if (tc->tc_state == STATE_NEXTK2_SENT)
+		enable_encryption(tc);
+
+	if (peer->tc_state == STATE_NEXTK2_SENT)
+		enable_encryption(peer);
+
+	switch (tc->tc_state) {
+	case STATE_INIT1_SENT:
+	case STATE_PKCONF_SENT:
+		rdr_process_init(tc);
+		return;
+	}
+
+	if (tc->tc_state == STATE_ENCRYPTING
+	    || peer->tc_state == STATE_ENCRYPTING
+	    || tc->tc_state == STATE_RDR_PLAIN
+	    || peer->tc_state == STATE_RDR_PLAIN) {
+		proxy_connection(tc);
+		return;
+	}
+
+	xprintf(XP_ALWAYS, "unhandled RDR %d\n", tc->tc_state);
+}
+
+static void rdr_remote_handler(struct fd *fd)
+{
+	struct tc *tc = fd->fd_priv;
+
+	if (!tc->tc_rdr_connected) {
+		rdr_check_connect(tc);
+		return;
+	}
+
+	rdr_local_handler(fd);
+}
+
+static void rdr_new_connection(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+{
+        struct sockaddr_in from, to;
+        int s, flags, rc;
+        struct fd *sock;
+        socklen_t len;
+        int tos = IPTOS_RELIABILITY;
+	struct tc *peer;
+	int in = tc->tc_dir_packet == DIR_IN;
+
+        /* figure out where connection is going to */
+        memset(&to, 0, sizeof(to));
+        memset(&from, 0, sizeof(from));
+
+        from.sin_family = to.sin_family = PF_INET;
+
+        from.sin_port        = tcp->th_sport;
+        from.sin_addr.s_addr = ip->ip_src.s_addr;
+
+        to.sin_port          = tcp->th_dport;
+        to.sin_addr.s_addr   = ip->ip_dst.s_addr;
+
+        /* connect to destination */
+        if ((s = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1)
+                err(1, "socket()");
+
+        if ((flags = fcntl(s, F_GETFL)) == -1)
+                err(1, "fcntl()");
+
+        flags |= O_NONBLOCK;
+
+        if (fcntl(s, F_SETFL, flags) == -1)
+                err(1, "fcntl()");
+
+	/* signal handshake to firewall */
+        if (setsockopt(s, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)) == -1)
+            err(1, "setsockopt()");
+
+	/* XXX bypass firewall */
+        if (in) {
+		memcpy(&tc->tc_rdr_addr, &to, sizeof(tc->tc_rdr_addr));
+                to.sin_addr.s_addr = inet_addr("127.0.0.1");
+	}
+
+        rc = connect(s, (struct sockaddr*) &to, sizeof(to));
+        if (rc == -1 && errno != EINPROGRESS) {
+		close(s);
+		tc->tc_state = STATE_DISABLED;
+		return;
+	}
+
+	/* XXX */
+	if (in) {
+		to.sin_port = htons(REDIRECT_PORT);
+	} else {
+		len = sizeof(from);
+
+		if (getsockname(s, (struct sockaddr*) &from, &len) == -1)
+			err(1, "getsockname()");
+	}
+
+        /* create peer */
+	peer = do_new_connection(from.sin_addr.s_addr, from.sin_port,
+				 to.sin_addr.s_addr, to.sin_port, in);
+
+        xprintf(XP_NOISY, "Adding a connection %s:%d",
+	        inet_ntoa(from.sin_addr),
+		ntohs(from.sin_port));
+
+        xprintf(XP_NOISY, "->%s:%d [%p]%s\n",
+                inet_ntoa(to.sin_addr),
+		ntohs(to.sin_port), peer,
+		in ? " inbound" : "");
+
+        sock = add_fd(s, rdr_remote_handler);
+	sock->fd_priv  = peer;
+	sock->fd_state = FD_WRITE;
+
+	peer->tc_rdr_fd      = sock;
+	peer->tc_rdr_state   = STATE_RDR_REMOTE;
+	peer->tc_rdr_peer    = tc;
+	peer->tc_rdr_inbound = in;
+
+	memcpy(&peer->tc_rdr_addr, &to, sizeof(peer->tc_rdr_addr));
+
+        /* save SYN to replay once connection is successful */
+        len = ntohs(ip->ip_len);
+        assert(len < sizeof(peer->tc_rdr_buf));
+
+        memcpy(peer->tc_rdr_buf, ip, len);
+        peer->tc_rdr_len = len;
+
+	tc->tc_rdr_peer  = peer;
+	tc->tc_rdr_state = STATE_RDR_LOCAL;
+
+	return;
+}
+
+static int rdr_syn_ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+{
+	struct tc *peer = tc->tc_rdr_peer;
+
+	if (tc->tc_rdr_inbound) {
+		int rc;
+
+		assert(peer);
+
+		switch (peer->tc_state) {
+		case STATE_HELLO_RCVD:
+			rc = do_output_hello_rcvd(peer, ip, tcp);
+
+			if (rc == DIVERT_DROP)
+				return rc;
+
+			break;
+
+		case STATE_NEXTK2_SENT:
+			/* syn ack rtx */
+		case STATE_NEXTK1_RCVD:
+			rc = do_output_nextk1_rcvd(peer, ip, tcp);
+			break;
+
+		case STATE_RDR_PLAIN:
+			break;
+
+		default:
+			return DIVERT_DROP;
+		}
+
+		/* we're still redirecting manually */
+		ip->ip_src.s_addr = peer->tc_rdr_addr.sin_addr.s_addr;
+		tcp->th_sport     = peer->tc_rdr_addr.sin_port;
+		checksum_packet(tc, ip, tcp);
+
+		return DIVERT_MODIFY;
+	}
+
+	switch (tc->tc_state) {
+	case STATE_HELLO_SENT:
+		do_input_hello_sent(tc, ip, tcp);
+		break;
+
+	case STATE_NEXTK1_SENT:
+		do_input_nextk1_sent(tc, ip, tcp);
+
+		/* XXX wait to send an ACK */
+		if (tc->tc_state == STATE_ENCRYPTING)
+			rdr_handshake_complete(tc);
+		break;
+	}
+
+	if (tc->tc_state == STATE_DISABLED) {
+		tc->tc_state = STATE_RDR_PLAIN;
+		rdr_handshake_complete(tc);
+	}
+
+	return DIVERT_DROP;
+}
+
+static int rdr_ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+{
+	int rc;
+
+	/* send init1 */
+	if (tc->tc_state == STATE_PKCONF_RCVD) {
+		rc = do_output_pkconf_rcvd(tc, ip, tcp, 0);
+
+		if (write(tc->tc_rdr_fd->fd_fd, tc->tc_rdr_buf, tc->tc_rdr_len)
+		    != tc->tc_rdr_len) {
+			kill_rdr(tc);
+			return DIVERT_DROP;
+		}
+
+		/* drop packet - let's add ENO to it */
+		return DIVERT_DROP;
+	}
+
+	/* add eno to init1 */
+	if (tc->tc_state == STATE_INIT1_SENT) {
+		if (is_init(ip, tcp, TC_INIT1))
+			return do_output_pkconf_rcvd(tc, ip, tcp, 1);
+	}
+
+	return DIVERT_DROP;
+}
+
+static int rdr_syn(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+{
+	int in = tc->tc_dir_packet == DIR_IN;
+
+        /* our own connections */
+        if (ip->ip_dst.s_addr == inet_addr("127.0.0.1")
+            && ip->ip_dst.s_addr == ip->ip_src.s_addr)
+                return DIVERT_ACCEPT;
+
+	/* new connection */
+	if (tc->tc_rdr_state == STATE_RDR_NONE)
+		rdr_new_connection(tc, ip, tcp);
+
+	/* incoming */
+	if (in) {
+		switch (tc->tc_state) {
+		case STATE_NEXTK1_RCVD:
+			/* XXX check same SID */
+		case STATE_HELLO_RCVD:
+		case STATE_CLOSED:
+			do_input_closed(tc, ip, tcp);
+
+			if (tc->tc_state == STATE_DISABLED)
+				tc->tc_state = STATE_RDR_PLAIN;
+
+			/* XXX clamp MSS */
+			return DIVERT_DROP;
+		}
+
+		return DIVERT_DROP;
+	}
+
+	/* outbound */
+
+	/* Add ENO to SYN */
+	if (tc->tc_rdr_state == STATE_RDR_REMOTE) {
+		switch (tc->tc_state) {
+		case STATE_HELLO_SENT:
+		case STATE_NEXTK1_SENT:
+		case STATE_CLOSED:
+			return do_output_closed(tc, ip, tcp);
+		}
+	}
+
+	/* drop original non-ENO syn */
+
+	return DIVERT_DROP;
+}
+
+static int rdr_packet(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+{
+	if (tcp->th_flags == TH_SYN)
+		return rdr_syn(tc, ip, tcp);
+
+	if (tcp->th_flags == (TH_SYN | TH_ACK))
+		return rdr_syn_ack(tc, ip, tcp);
+
+	if (tcp->th_flags & TH_ACK)
+		return rdr_ack(tc, ip, tcp);
+
+	return DIVERT_DROP;
+}
+
 int tcpcrypt_packet(void *packet, int len, int flags)
 {
 	struct ip *ip = packet;
@@ -2869,10 +3457,14 @@ int tcpcrypt_packet(void *packet, int len, int flags)
 	tc->tc_dir_packet = (flags & DF_IN) ? DIR_IN : DIR_OUT;
 	tc->tc_csum       = 0;
 
-	if (flags & DF_IN)
-		rc = do_input(tc, ip, tcp);
-	else
-		rc = do_output(tc, ip, tcp);
+	if (_conf.cf_rdr) {
+		rc = rdr_packet(tc, ip, tcp);
+	} else {
+		if (flags & DF_IN)
+			rc = do_input(tc, ip, tcp);
+		else
+			rc = do_output(tc, ip, tcp);
+	}
 
 	/* XXX for performance measuring - ensure sane results */
 	assert(!_conf.cf_debug || (tc->tc_state != STATE_DISABLED));
@@ -3318,8 +3910,120 @@ static void init_random(void)
 	}
 }
 
+static struct tc *lookup_connection_rdr(struct sockaddr_in *s_in)
+{
+	int i, j;
+	struct conn *c;
+
+	/* XXX data strcuture fail */
+	for (i = 0; i < sizeof(_connection_map) / sizeof(*_connection_map); i++)
+	{
+		c = _connection_map[i];
+		if (!c)
+			continue;
+
+		while ((c = c->c_next)) {
+			for (j = 0; j < 2; j++) {
+				struct sockaddr_in *s = &c->c_addr[j];
+
+				if (s->sin_addr.s_addr == s_in->sin_addr.s_addr
+				    && s->sin_port == s_in->sin_port) {
+					return c->c_tc;
+				}
+			}
+		}
+	}
+
+	return NULL;
+}
+
+static void redirect_listen_handler(struct fd *fd)
+{
+        struct sockaddr_in s_in;
+        socklen_t len = sizeof(s_in);
+	int dude;
+	struct tc *tc, *peer;
+
+        /* Accept redirected connection */
+        if ((dude = accept(fd->fd_fd, (struct sockaddr*) &s_in, &len)) == -1) {
+                xprintf(XP_ALWAYS, "accept() failed\n");
+                return;
+        }
+
+        /* try to find him */
+	tc = lookup_connection_rdr(&s_in);
+	if (!tc) {
+                xprintf(XP_ALWAYS, "Couldn't find dude %s:%d\n",
+			inet_ntoa(s_in.sin_addr), ntohs(s_in.sin_port));
+                close(dude);
+                return;
+        }
+
+	peer = tc->tc_rdr_peer;
+
+	if (tc->tc_rdr_inbound) {
+		struct tc *tmp = peer;
+
+		peer = tc;
+		tc   = tmp;
+	}
+
+	assert(peer);
+	assert(peer->tc_rdr_peer == tc);
+	assert(peer->tc_rdr_fd);
+	assert(!tc->tc_rdr_fd);
+
+	fd = add_fd(dude, rdr_local_handler);
+	fd->fd_priv   = tc;
+	tc->tc_rdr_fd = fd;
+
+	memcpy(&tc->tc_rdr_addr, &s_in, sizeof(tc->tc_rdr_addr));
+
+        xprintf(XP_NOISY, "Redirect proxy accepted %s:%d",
+                inet_ntoa(tc->tc_rdr_addr.sin_addr),
+		ntohs(tc->tc_rdr_addr.sin_port));
+
+        xprintf(XP_NOISY, "->%s:%d\n",
+                inet_ntoa(peer->tc_rdr_addr.sin_addr),
+		ntohs(peer->tc_rdr_addr.sin_port));
+
+	/* wake up peer */
+	if (peer->tc_rdr_fd->fd_state == FD_IDLE)
+		peer->tc_rdr_fd->fd_state = FD_READ;
+}
+
+static void init_rdr(void)
+{
+        int s, one = 1;
+        struct sockaddr_in s_in;
+
+	if (!_conf.cf_rdr)
+		return;
+
+        if ((s = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1)
+                err(1, "socket()");
+
+        if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) == -1)
+                err(1, "setsockopt()");
+
+        memset(&s_in, 0, sizeof(s_in));
+
+        s_in.sin_family      = PF_INET;
+        s_in.sin_port        = htons(REDIRECT_PORT);
+        s_in.sin_addr.s_addr = INADDR_ANY;
+
+        if (bind(s, (struct sockaddr*) &s_in, sizeof(s_in)) == -1)
+                err(1, "bind()");
+
+        if (listen(s, 5) == -1)
+                err(1, "listen()");
+
+        add_fd(s, redirect_listen_handler);
+}
+
 void tcpcrypt_init(void)
 {
 	init_random();
 	init_ciphers();
+	init_rdr();
 }

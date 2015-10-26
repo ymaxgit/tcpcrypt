@@ -121,7 +121,7 @@ struct tc_sess {
 };
 
 struct tc_sid {
-        uint8_t ts_sid[8];
+        uint8_t ts_sid[9];
 } __attribute__ ((__packed__));
 
 struct tc_sess_opt {

@@ -78,6 +78,7 @@ static void add_server(int port)
 
 	memset(&s_in, 0, sizeof(s_in));
 
+	s_in.sin_family = PF_INET;
 	s_in.sin_addr.s_addr = inet_addr(_bind_ip);
 	s_in.sin_port        = htons(port);
 

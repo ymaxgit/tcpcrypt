@@ -64,8 +64,7 @@ else
   os_linux=0
 fi
 AM_CONDITIONAL(OS_LINUX, [test "$os_linux" -eq 1])
-AM_CONDITIONAL(OS_BSD, [echo $host_os | grep freebsd])
-AM_CONDITIONAL(OS_OSX, [echo $host_os | grep darwin])
+AM_CONDITIONAL(OS_BSD, [echo $host_os | grep -E 'darwin|freebsd'])
 AM_CONDITIONAL(OS_MINGW, [echo $host_os | grep mingw])
 
 AS_IF([test "$os_linux" -eq 1],

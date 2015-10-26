@@ -15,7 +15,7 @@
 static int	  _s;
 static divert_cb _cb;
 
-int divert_open(int port, divert_cb cb)
+static int bsd_open(int port, divert_cb cb)
 {
 	struct sockaddr_in s_in;
 
@@ -34,17 +34,17 @@ int divert_open(int port, divert_cb cb)
 
         xprintf(XP_DEFAULT, "Divert packets using ipfw add divert %d\n", port);
 
-	open_raw();
+	raw_open();
 
 	return _s;
 }
 
-void divert_close(void)
+static void bsd_close(void)
 {
 	close(_s);
 }
 
-void divert_next_packet(int s)
+static void bsd_next_packet(int s)
 {
 	unsigned char buf[2048];
 	struct sockaddr_in s_in;
@@ -85,4 +85,19 @@ void divert_next_packet(int s)
 		abort();
 		break;
 	}
+}
+
+struct divert *divert_get(void)
+{
+        static struct divert _divert_bsd = {
+                .open           = bsd_open,
+                .next_packet    = bsd_next_packet,
+                .close          = bsd_close,
+                .inject         = raw_inject,
+        };
+
+	if (_conf.cf_rdr)
+		return divert_get_pcap();
+
+        return &_divert_bsd;
 }

@@ -23,8 +23,8 @@ struct divert {
 extern struct divert *divert_get(void);
 extern struct divert *_divert;
 
-extern void divert_inject_pcap(void *data, int len);
 extern void raw_inject(void *data, int len);
 extern void raw_open(void);
+extern struct divert *divert_get_pcap(void);
 
 #endif /* __TCPCRYPT_DIVERT_H__ */

@@ -984,7 +984,6 @@ static void rdr_check_connect(struct tc *tc)
 	tc->tc_rdr_connected = 1;
 	fd->fd_state = FD_IDLE;
 
-	/* we need to manually redirect... */
 	if (tc->tc_rdr_inbound) {
                 /* we need to manually redirect... */
                 struct tcphdr *tcp = get_tcp(ip);
@@ -3178,10 +3177,10 @@ static void rdr_new_connection(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
         to.sin_port          = tcp->th_dport;
         to.sin_addr.s_addr   = ip->ip_dst.s_addr;
 
-	/* XXX this is retarded - we rely on the SYN retransmit to kick things
-	 * off again
-	 */
-	if (_divert->orig_dest(&to, ip, &flags) == -1) {
+	if (_divert->orig_dest && _divert->orig_dest(&to, ip, &flags) == -1) {
+		/* XXX this is retarded - we rely on the SYN retransmit to kick
+		 * things off again
+		 */
 		tc->tc_rdr_drop_sa = 1;
 		xprintf(XP_ALWAYS, "Can't find RDR\n");
 		return;
@@ -3288,6 +3287,7 @@ static int handle_syn_ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	case STATE_NEXTK1_RCVD:
 		return do_output_nextk1_rcvd(tc, ip, tcp);
 
+	case STATE_CLOSED:
 	case STATE_RDR_PLAIN:
 		break;
 
@@ -3396,7 +3396,8 @@ static int rdr_syn(struct tc *tc, struct ip *ip, struct tcphdr *tcp, int flags)
 	if (in) {
 		/* drop the locally generated SYN */
 		if (tc->tc_rdr_state == STATE_RDR_LOCAL
-		    && !tc->tc_rdr_drop_sa) {
+		    && !tc->tc_rdr_drop_sa
+		    && !tc->tc_rdr_peer->tc_rdr_inbound) {
 			return DIVERT_DROP;
 		}
 

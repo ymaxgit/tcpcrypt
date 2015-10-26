@@ -111,16 +111,7 @@ void raw_inject(void *data, int len)
 #endif
 }
 
-void divert_cycle(void)
-{
-}
-
-void divert_inject(void *data, int len)
-{
-	raw_inject(data, len);
-}
-
-void divert_next_packet_pcap(int s)
+static void divert_next_packet_pcap(int s)
 {
 	struct pcap_pkthdr h;
 	struct pktap_header *pktap;
@@ -179,7 +170,7 @@ void divert_next_packet_pcap(int s)
 
 	case DIVERT_MODIFY:
 		ip = (struct ip*) data;
-		divert_inject(data, ntohs(ip->ip_len));
+		_divert->inject(data, ntohs(ip->ip_len));
 		break;
 	}
 
@@ -189,7 +180,7 @@ __bad_packet:
 	return;
 }
 
-void divert_inject_pcap(void *data, int len)
+static void divert_inject_pcap(void *data, int len)
 {
 	struct ip *ip = data;
 	uint8_t tos = ip->ip_tos;
@@ -205,7 +196,7 @@ void divert_inject_pcap(void *data, int len)
 	ip->ip_sum = sum;
 }
 
-int divert_open_pcap(int port, divert_cb cb)
+static int divert_open_pcap(int port, divert_cb cb)
 {
 	char buf[PCAP_ERRBUF_SIZE];
 	pcap_t *p;
@@ -217,7 +208,7 @@ int divert_open_pcap(int port, divert_cb cb)
 		errx(1, "pcap_create(): %s", buf);
 
 #ifdef __DARWIN_UNIX03
-	pcap_set_want_pktap(p, 1);
+//	pcap_set_want_pktap(p, 1);
 #endif
 	pcap_set_snaplen(p, 2048);
 	pcap_set_timeout(p, 1);
@@ -243,7 +234,19 @@ int divert_open_pcap(int port, divert_cb cb)
 	return fd;
 }
 
-void divert_close_pcap(void)
+static void divert_close_pcap(void)
 {
 	pcap_close(_pcap);
+}
+
+struct divert *divert_get_pcap(void)
+{
+        static struct divert _divert_pf = {
+                .open           = divert_open_pcap,
+                .next_packet    = divert_next_packet_pcap,
+                .close          = divert_close_pcap,
+                .inject         = divert_inject_pcap,
+        };
+
+        return &_divert_pf;
 }

@@ -391,8 +391,10 @@ struct divert *divert_get(void)
 		.orig_dest	= linux_orig_dest,
 	};
 
-	if (_conf.cf_rdr)
-		_divert_linux.inject = divert_inject_pcap;
+        if (_conf.cf_rdr) {
+                struct divert *pcap = divert_get_pcap();
+                _divert_linux.inject = pcap->inject;
+        }
 
 	return &_divert_linux;
 }

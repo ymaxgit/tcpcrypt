@@ -109,7 +109,7 @@ AC_CHECK_LIB([cap], [cap_set_flag], [tcpcryptd_LDADD="-lcap $tcpcryptd_LDADD"])
 AC_CHECK_LIB([crypto], [EVP_OpenInit], [crypto_LDADD="-lcrypto"])
 
 AC_CHECK_LIB([netfilter_queue], [nfq_open], [tcpcryptd_LDADD="-lnetfilter_queue $tcpcryptd_LDADD"])
-
+AC_CHECK_LIB([netfilter_conntrack], [nfct_open], [tcpcryptd_LDADD="-lnetfilter_conntrack $tcpcryptd_LDADD"])
 AC_CHECK_LIB([nfnetlink], [nfnl_rcvbufsiz], [tcpcryptd_LDADD="-lnfnetlink $tcpcryptd_LDADD"])
 AC_CHECK_LIB([pcap], [pcap_open_live], [tcpcryptd_LDADD="-lpcap $tcpcryptd_LDADD"])
 AC_CHECK_LIB([pthread], [pthread_create])

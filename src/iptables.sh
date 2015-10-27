@@ -28,3 +28,6 @@ iptables -t nat -A OUTPUT -p tcp --dport $PR -m owner --uid-owner tcpcryptd \
 	-j ACCEPT
 
 iptables -t nat -A OUTPUT -p tcp --dport $PR -j REDIRECT --to-port 65530
+
+###### clean up all ths tos tricks we've been doing
+iptables -t mangle -A POSTROUTING -m tos --tos 0x04 -j TOS --set-tos 0x00

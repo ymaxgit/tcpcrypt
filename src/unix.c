@@ -208,7 +208,7 @@ static int divert_open_pcap(int port, divert_cb cb)
 		errx(1, "pcap_create(): %s", buf);
 
 #ifdef __DARWIN_UNIX03
-//	pcap_set_want_pktap(p, 1);
+	pcap_set_want_pktap(p, 1);
 #endif
 	pcap_set_snaplen(p, 2048);
 	pcap_set_timeout(p, 1);

@@ -19,6 +19,7 @@
 		58C9294F121B3242002FE941 /* TcpcryptLauncherAppDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = 58C9294E121B3242002FE941 /* TcpcryptLauncherAppDelegate.m */; };
 		58EDEADC1220A1A100AA7A7F /* tcpcryptd_wrapper in Resources */ = {isa = PBXBuildFile; fileRef = 58EDEA3912208C3900AA7A7F /* tcpcryptd_wrapper */; };
 		58EDEBB31220B2A900AA7A7F /* TcpcryptLauncher.icns in Resources */ = {isa = PBXBuildFile; fileRef = 58EDEBB21220B2A900AA7A7F /* TcpcryptLauncher.icns */; };
+		CD1986CF1BE1E08E007F236D /* pf.conf in Resources */ = {isa = PBXBuildFile; fileRef = CD1986CE1BE1E08E007F236D /* pf.conf */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -32,7 +33,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		58456380134841F600704BF3 /* tcpcryptd */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; name = tcpcryptd; path = ../../user/src/tcpcryptd; sourceTree = "<group>"; };
+		58456380134841F600704BF3 /* tcpcryptd */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; name = tcpcryptd; path = ../../src/tcpcryptd; sourceTree = "<group>"; };
 		58B394F6121B3C5300EE7796 /* TCTcpcryptController.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = TCTcpcryptController.h; sourceTree = "<group>"; };
 		58B394F7121B3C5300EE7796 /* TCTcpcryptController.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = TCTcpcryptController.m; sourceTree = "<group>"; };
 		58B39614121B538200EE7796 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
@@ -49,6 +50,7 @@
 		58C9294E121B3242002FE941 /* TcpcryptLauncherAppDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = TcpcryptLauncherAppDelegate.m; sourceTree = "<group>"; };
 		58EDEA3912208C3900AA7A7F /* tcpcryptd_wrapper */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = tcpcryptd_wrapper; sourceTree = BUILT_PRODUCTS_DIR; };
 		58EDEBB21220B2A900AA7A7F /* TcpcryptLauncher.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = TcpcryptLauncher.icns; sourceTree = "<group>"; };
+		CD1986CE1BE1E08E007F236D /* pf.conf */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text; name = pf.conf; path = ../../src/pf.conf; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -123,6 +125,7 @@
 		58C92935121B3242002FE941 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				CD1986CE1BE1E08E007F236D /* pf.conf */,
 				58EDEBB21220B2A900AA7A7F /* TcpcryptLauncher.icns */,
 				58C92940121B3242002FE941 /* TcpcryptLauncher-Info.plist */,
 				58C92942121B3242002FE941 /* InfoPlist.strings */,
@@ -194,7 +197,7 @@
 		58C9292E121B3241002FE941 /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
-				LastUpgradeCheck = 0510;
+				LastUpgradeCheck = 0640;
 			};
 			buildConfigurationList = 58C92931121B3241002FE941 /* Build configuration list for PBXProject "TcpcryptLauncher" */;
 			compatibilityVersion = "Xcode 3.2";
@@ -225,6 +228,7 @@
 				58EDEADC1220A1A100AA7A7F /* tcpcryptd_wrapper in Resources */,
 				58EDEBB31220B2A900AA7A7F /* TcpcryptLauncher.icns in Resources */,
 				58456381134841F600704BF3 /* tcpcryptd in Resources */,
+				CD1986CF1BE1E08E007F236D /* pf.conf in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -243,7 +247,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "cd ../../user/\nmake STATIC=1";
+			shellScript = "cd ../../\nmake STATIC=1";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -346,8 +350,11 @@
 				CLANG_WARN_EMPTY_BODY = YES;
 				CLANG_WARN_ENUM_CONVERSION = YES;
 				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu99;
+				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_OPTIMIZATION_LEVEL = 0;
 				GCC_PREPROCESSOR_DEFINITIONS = DEBUG;
 				GCC_VERSION = com.apple.compilers.llvm.clang.1_0;
@@ -372,8 +379,11 @@
 				CLANG_WARN_EMPTY_BODY = YES;
 				CLANG_WARN_ENUM_CONVERSION = YES;
 				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu99;
+				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_VERSION = com.apple.compilers.llvm.clang.1_0;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
 				GCC_WARN_ABOUT_RETURN_TYPE = YES;

@@ -1129,12 +1129,13 @@ int main(int argc, char *argv[])
 		errx(1, "WSAStartup()");
 #endif
 
-	_conf.cf_divert	     = TCPCRYPTD_DIVERT_PORT;
-	_conf.cf_ctl  	     = TCPCRYPTD_CONTROL_SOCKET;
-	_conf.cf_test 	     = -1;
-	_conf.cf_test_server = TCPCRYPTD_TEST_SERVER;
-	_conf.cf_jail_dir    = TCPCRYPTD_JAIL_DIR;
-	_conf.cf_jail_user   = TCPCRYPTD_JAIL_USER;
+	_conf.cf_divert	     	      = TCPCRYPTD_DIVERT_PORT;
+	_conf.cf_ctl  	     	      = TCPCRYPTD_CONTROL_SOCKET;
+	_conf.cf_test 	     	      = -1;
+	_conf.cf_test_server 	      = TCPCRYPTD_TEST_SERVER;
+	_conf.cf_jail_dir    	      = TCPCRYPTD_JAIL_DIR;
+	_conf.cf_jail_user   	      = TCPCRYPTD_JAIL_USER;
+	_conf.cf_disable_network_test = 1;
 
 	if (argc == 2 && argv[1][0] == '-' && argv[1][1] == '-') {
 		if (strcmp(argv[1], "--help") == 0) {

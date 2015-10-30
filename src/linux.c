@@ -1,6 +1,8 @@
 #include <netinet/in.h>
 #include <linux/netfilter.h>
 #include <libnetfilter_queue/libnetfilter_queue.h>
+#include <libnetfilter_conntrack/libnetfilter_conntrack.h>
+#include <libnetfilter_conntrack/libnetfilter_conntrack_tcp.h>
 #include <netinet/ip.h>
 #include <err.h>
 #include <stdio.h>
@@ -25,13 +27,20 @@
 static struct nfq_handle    *_h;
 static struct nfq_q_handle  *_q;
 static unsigned int	    _mark;
-static int		    _conntrack[2];
+static struct nfct_handle   *_ct;
+
+static struct ct_arg {
+	struct sockaddr_in	*ct_to;
+	struct ip		*ct_ip;
+	int			*ct_flags;
+	int			ct_rc;
+} _ct_arg;
 
 static int packet_input(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
               		struct nfq_data *nfa, void *data)
 {
 	divert_cb cb = (divert_cb) data;
-	char *d;
+	unsigned char *d;
 	int len;
 	int rc;
 	unsigned int id;
@@ -95,73 +104,60 @@ static int packet_input(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
 	return 0;
 }
 
-/* IPC because we drop privs later on */
+static int conntrack_find(enum nf_conntrack_msg_type type,
+			  struct nf_conntrack *ct,
+			  void *data)
+{
+	struct ct_arg *arg = data;
+	int *flags = arg->ct_flags;
+	struct sockaddr_in *to = arg->ct_to;
+	struct ip *ip = arg->ct_ip;
+	struct tcphdr *tcp = (struct tcphdr*) ((unsigned long) ip
+                                               + ip->ip_hl * 4);
+
+	if (arg->ct_rc == 0)
+		return NFCT_CB_CONTINUE;
+
+#if 0
+	char buf[1024];
+	nfct_snprintf(buf, sizeof(buf), ct, type, NFCT_O_DEFAULT, 0);
+	printf("YO [%s]\n", buf);
+	return NFCT_CB_CONTINUE;
+#endif
+
+	if (nfct_get_attr_u32(ct, ATTR_IPV4_SRC) != ip->ip_src.s_addr)
+		return NFCT_CB_CONTINUE;
+
+	if (nfct_get_attr_u16(ct, ATTR_PORT_SRC) != tcp->th_sport)
+		return NFCT_CB_CONTINUE;
+
+	switch (nfct_get_attr_u8(ct, ATTR_TCP_STATE)) {
+	case TCP_CONNTRACK_SYN_RECV:
+		*flags = DF_IN;
+		break;
+
+	case TCP_CONNTRACK_SYN_SENT:
+		*flags = 0;
+		break;
+
+	default:
+		return NFCT_CB_CONTINUE;
+	}
+
+	to->sin_addr.s_addr = nfct_get_attr_u32(ct, ATTR_ORIG_IPV4_DST);
+	to->sin_port        = nfct_get_attr_u16(ct, ATTR_ORIG_PORT_DST);
+
+	arg->ct_rc = 0;
+
+	return NFCT_CB_CONTINUE;
+}
+
 static void conntrack_open(void)
 {
-	int pid;
+	if (!(_ct = nfct_open(CONNTRACK, 0)))
+		err(1, "nfct_open()");
 
-	if (socketpair(PF_UNIX, SOCK_STREAM, 0, _conntrack) == -1)
-		err(1, "socketpair()");
-
-	if ((pid = fork()) == -1)
-		err(1, "fork()");
-
-	if (pid != 0) {
-		close(_conntrack[1]);
-		/* parent - keep working */
-		return;
-	}
-
-	/* child */
-	close(_conntrack[0]);
-
-	/* for now */
-	close(0);
-	close(1);
-	close(2);
-
-	while (1) {
-		unsigned char x;
-		int rc;
-		struct msghdr mh;
-		int fd;
-		char buf[CMSG_SPACE(sizeof(fd))];
-		struct cmsghdr *cm;
-		int *fdp;
-		struct iovec iov;
-
-		if ((rc = read(_conntrack[1], &x, 1)) <= 0)
-			break;
-
-		if ((fd = open("/proc/net/nf_conntrack", O_RDONLY)) == -1)
-			err(1, "open(conntrack)");
-
-		memset(&mh, 0, sizeof(mh));
-		mh.msg_control    = buf;
-		mh.msg_controllen = sizeof(buf);
-
-		cm = CMSG_FIRSTHDR(&mh);
-		cm->cmsg_level = SOL_SOCKET;
-		cm->cmsg_type  = SCM_RIGHTS;
-		cm->cmsg_len   = CMSG_LEN(sizeof(fd));
-
-		fdp  = (int *) CMSG_DATA(cm);
-		*fdp = fd;
-
-		iov.iov_base = &x;
-		iov.iov_len  = sizeof(x);
-
-		mh.msg_controllen = cm->cmsg_len;
-		mh.msg_iov        = &iov;
-		mh.msg_iovlen     = 1;
-
-		if (sendmsg(_conntrack[1], &mh, 0) == -1)
-			err(1, "sendmsg()");
-
-		close(fd);
-	}
-
-	exit(0);
+	nfct_callback_register(_ct, NFCT_T_ALL, conntrack_find, &_ct_arg);
 }
 
 static int linux_open(int port, divert_cb cb)
@@ -217,7 +213,6 @@ static int linux_open(int port, divert_cb cb)
 		err(1, "fcntl()");
 
 	raw_open();
-
 	conntrack_open();
 
 	return fd;
@@ -230,6 +225,9 @@ static void linux_close(void)
 
         if (_h)
                 nfq_close(_h);
+
+	if (_ct)
+		nfct_close(_ct);
 }
 
 static void linux_next_packet(int s)
@@ -255,130 +253,21 @@ static void linux_next_packet(int s)
 
 static int linux_orig_dest(struct sockaddr_in *to, struct ip *ip, int *flags)
 {
-	int fd, *fdp;
-	struct msghdr mh;
-	char buf[4096 * 5];
-	struct cmsghdr *cm;
-	unsigned char x = 'a';
-	struct iovec iov;
-	int rc;
-	char match[128];
-	char match2[128];
-	char *found = NULL;
-	char *p, *p2;
-	struct tcphdr *tcp = (struct tcphdr*) ((unsigned long) ip
-					       + ip->ip_hl * 4);
+	int family = AF_INET;
+	struct ct_arg *arg = &_ct_arg;
 
-	assert(sizeof(buf) >= CMSG_SPACE(sizeof(fd)));
+	memset(arg, 0, sizeof(*arg));
 
-	iov.iov_base = &x;
-	iov.iov_len  = 1;
+	arg->ct_to    = to;
+	arg->ct_ip    = ip;
+	arg->ct_flags = flags;
+	arg->ct_rc    = -1;
 
-	if (write(_conntrack[0], &x, sizeof(x)) != 1)
-		err(1, "write()");
+	/* XXX have specific filter */
+	if (nfct_query(_ct, NFCT_Q_DUMP, &family) < 0)
+		err(1, "nfct_query()");
 
-	memset(&mh, 0, sizeof(mh));
-	mh.msg_control    = buf;
-	mh.msg_controllen = sizeof(buf);
-	mh.msg_iov        = &iov;
-	mh.msg_iovlen     = 1;
-
-	if (recvmsg(_conntrack[0], &mh, 0) == -1)
-		err(1, "recvmsg()");
-
-	cm = CMSG_FIRSTHDR(&mh);
-	assert(cm);
-	assert(cm->cmsg_level == SOL_SOCKET);
-	assert(cm->cmsg_type  == SCM_RIGHTS);
-	assert(cm->cmsg_len   == CMSG_LEN(sizeof(fd)));
-
-	fdp = (int*) CMSG_DATA(cm);
-	fd  = *fdp;
-
-	snprintf(match, sizeof(match), " src=%s dst=",
-		 inet_ntoa(ip->ip_src));
-
-	snprintf(match2, sizeof(match2), "sport=%d dport=",
-		 ntohs(tcp->th_sport));
-
-	/* XXX make parsing more precise and robust */
-
-	/* XXX read and glue whole thing - incorrect code */
-	while ((rc = read(fd, buf, sizeof(buf) - 1)) > 0) {
-		p = buf;
-
-		buf[rc] = 0;
-
-		if (rc == sizeof(buf) - 1)
-			xprintf(XP_ALWAYS, "CODEME\n");
-
-		while (*p) {
-			char *line = p = strstr(p, match);
-			if (!p)
-				break;
-
-			p2 = strchr(p, '\n');
-			if (!p2)
-				break;
-
-			*p2++ = 0;
-			p = p2;
-
-			if ((p2 = strstr(line, match2)) == NULL)
-				continue;
-
-			found = line;
-			break;
-		}
-
-		if (found)
-			break;
-	}
-
-	if (rc == -1)
-		err(1, "read()");
-
-	close(fd);
-
-	if (!found)
-		return -1;
-
-	assert(found >= buf);
-
-	/* XXX */
-	found -= 8;
-	if (found < buf)
-		return -1;
-
-	if (strstr(found, "SYN_SENT"))
-		*flags = 0;
-	else if (strstr(found, "SYN_RECV"))
-		*flags = DF_IN;
-	else
-		assert(!"dunno man");
-
-	p = strstr(found, "dst=");
-	assert(p);
-	p += 4;
-
-	p2 = strchr(p, ' ');
-	assert(p2);
-	*p2++ = 0;
-
-	if (inet_aton(p, &to->sin_addr) == 0)
-		errx(1, "inet_aton()");
-
-	p = strstr(p2, "dport=");
-	assert(p);
-	p += 6;
-
-	p2 = strstr(p, " ");
-	assert(p2);
-	*p2++ = 0;
-
-	to->sin_port = htons(atoi(p));
-
-	return 0;
+	return arg->ct_rc;
 }
 
 struct divert *divert_get(void)

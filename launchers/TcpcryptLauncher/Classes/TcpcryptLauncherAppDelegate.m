@@ -9,7 +9,7 @@
 
 #import "TcpcryptLauncherAppDelegate.h"
 
-#include "../../../user/src/tcpcrypt_version.h"
+#include "../../../src/tcpcrypt_version.h"
 
 @implementation TcpcryptLauncherAppDelegate
 

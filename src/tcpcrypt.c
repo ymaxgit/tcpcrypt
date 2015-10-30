@@ -184,22 +184,32 @@ static void crypto_free_keyset(struct tc *tc, struct tc_keyset *ks)
 		crypt_sym_destroy(ks->tc_alg_rx);
 }
 
-static void kill_rdr(struct tc *tc)
+static void do_kill_rdr(struct tc *tc)
 {
 	struct fd *fd = tc->tc_rdr_fd;
-	struct tc *peer = tc->tc_rdr_peer;
 
 	tc->tc_state = STATE_DISABLED;
 
 	if (fd) {
 		fd->fd_state = FD_DEAD;
 		close(fd->fd_fd);
+		fd->fd_fd = -1;
+		tc->tc_rdr_fd = NULL;
 	}
+}
+
+static void kill_rdr(struct tc *tc)
+{
+	struct tc *peer = tc->tc_rdr_peer;
+
+	do_kill_rdr(tc);
 
 	if (peer) {
 		assert(peer->tc_rdr_peer = tc);
-		peer->tc_rdr_peer = NULL;
-		kill_rdr(peer);
+
+		/* XXX will still leak conn and tc (if we don't receive other
+		 * packets) */
+		do_kill_rdr(peer);
 	}
 }
 
@@ -3048,6 +3058,9 @@ static void rdr_handshake_complete(struct tc *tc)
 {
 	int tos = 0;
 
+	if (!tc->tc_rdr_fd)
+		return;
+
 	/* stop intercepting handshake - all ENO opts have been set */
 	if (setsockopt(tc->tc_rdr_fd->fd_fd, IPPROTO_IP, IP_TOS, &tos,
 		       sizeof(tos)) == -1) {
@@ -3059,18 +3072,47 @@ static void rdr_handshake_complete(struct tc *tc)
 
 static void rdr_process_init(struct tc *tc)
 {
+	int headroom = 40;
 	unsigned char buf[2048];
 	int len;
 	struct ip *ip = (struct ip *) buf;
 	struct tcphdr *tcp = (struct tcphdr*) (ip + 1);
 	int rc;
 	struct fd *fd = tc->tc_rdr_fd;
+	struct tc_init1 *i1 = (struct tc_init1*) &buf[headroom];
+	int rem = sizeof(buf) - headroom;
+	fd_set fds;
+	struct timeval tv;
 
-	len = read(fd->fd_fd, &buf[40], sizeof(buf) - 40);
-	if (len <= 0) {
-		kill_rdr(tc);
-		return;
-	}
+	/* make sure we read only init1 and not past it.
+	 * First, figure out how big init is.  Then read that.
+	 */
+	if ((len = read(fd->fd_fd, i1, sizeof(*i1))) != sizeof(*i1))
+		goto __kill_rdr;
+
+	rem -= sizeof(*i1);
+
+	/* Read init */
+	len = ntohl(i1->i1_len);
+
+	if (len > rem || len < sizeof(*i1) || len < 0)
+		goto __kill_rdr;
+
+	rem = len - sizeof(*i1);
+
+	FD_ZERO(&fds);
+	FD_SET(fd->fd_fd, &fds);
+
+	tv.tv_sec = tv.tv_usec = 0;
+
+	if (select(fd->fd_fd + 1, &fds, NULL, NULL, &tv) == -1)
+		err(1, "select(2)");
+
+	if (!FD_ISSET(fd->fd_fd, &fds))
+		goto __kill_rdr;
+
+	if (read(fd->fd_fd, i1 + 1, rem) != rem)
+		goto __kill_rdr;
 
 	/* XXX */
 	fake_ip_tcp(ip, tcp, len);
@@ -3107,6 +3149,7 @@ static void rdr_process_init(struct tc *tc)
 
 	return;
 __kill_rdr:
+	xprintf(XP_ALWAYS, "Error reading INIT %p\n", tc);
 	kill_rdr(tc);
 	return;
 }
@@ -3137,9 +3180,16 @@ static void rdr_local_handler(struct fd *fd)
 		return;
 	}
 
-	/* XXX we should really fix this - shouldn't get here randomly */
-	xprintf(XP_ALWAYS, "unhandled RDR %d\n", tc->tc_state);
+	/* XXX we should really fix this - shouldn't get here randomly.
+	 * We should: 1. check if socket is dead / alive
+	 * 2. not put this thing in select until we're ready.
+	 * 3. def not spin the CPU
+	 */
+#if 0
+	xprintf(XP_ALWAYS, "unhandled RDR %d:%d\n",
+		tc->tc_state, peer->tc_state);
 	kill_rdr(tc);
+#endif
 }
 
 static void rdr_remote_handler(struct fd *fd)
@@ -3188,7 +3238,7 @@ static void rdr_new_connection(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 
 	in = flags & DF_IN;
 
-	xprintf(XP_ALWAYS, "RDR orig dest %s:%d\n",
+	xprintf(XP_NOISY, "RDR orig dest %s:%d\n",
 		inet_ntoa(to.sin_addr), ntohs(to.sin_port));
 
         /* connect to destination */
@@ -3736,6 +3786,24 @@ static int do_tcpcrypt_netstat(struct conn *c, void *val, unsigned int *len)
 		n->tn_dport	 = c->c_addr[1].sin_port;
 		n->tn_len	 = htons(tc->tc_sid.s_len);
 
+		if (_conf.cf_rdr) {
+			struct tc *peer = tc->tc_rdr_peer;
+
+			switch (peer->tc_rdr_state) {
+			case STATE_RDR_LOCAL:
+				n->tn_sip.s_addr = peer->tc_rdr_addr.sin_addr
+								.s_addr;
+				n->tn_sport = peer->tc_rdr_addr.sin_port;
+				break;
+
+			case STATE_RDR_REMOTE:
+				if (ntohs(n->tn_sport) == REDIRECT_PORT)
+					n->tn_sport = peer->tc_rdr_addr
+								.sin_port;
+				break;
+			}
+		}
+
 		memcpy(n->tn_sid, tc->tc_sid.s_data, tc->tc_sid.s_len);
 		n = (struct tc_netstat*) ((unsigned long) n + tl);
 		copied += tl;
@@ -4009,6 +4077,13 @@ static void redirect_listen_handler(struct fd *fd)
 
 		peer = tc;
 		tc   = tmp;
+	}
+
+	/* XXX */
+	if (!peer->tc_rdr_fd) {
+		close(dude);
+		kill_rdr(peer);
+		return;
 	}
 
 	assert(peer);

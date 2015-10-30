@@ -11,6 +11,7 @@ Dependencies
  * OpenSSL >= 0.9.8
  * libnfnetlink >= 0.0.40
  * libnetfilter_queue >= 0.0.16
+ * libnetfilter_conntrack >= 1.0.1
  * libcap
  * Kernel divert socket support (NFQUEUE)
 
@@ -18,7 +19,9 @@ Dependencies
 Ubuntu and Debian package dependencies
 --------------------------------------
     apt-get install iptables libcap-dev libssl-dev \
-                    libnfnetlink-dev libnetfilter-queue-dev
+                    libnfnetlink-dev \
+                    libnetfilter-queue-dev \
+                    libnetfilter-conntrack-dev
 
 
 Arch Linux package dependencies
@@ -31,7 +34,8 @@ pacman -S --needed \
         libnfnetlink \
         libnetfilter_queue \
         libcap \
-        libnetfilter_queue
+        libnetfilter_queue \
+        libnetfilter_conntrack
 
 
 Kernel divert sockets (NFQUEUE)

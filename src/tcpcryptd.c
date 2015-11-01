@@ -855,6 +855,9 @@ static void do_cycle(void)
 
 	if (_divert->cycle)
 		_divert->cycle();
+
+	if (_conf.cf_rdr)
+		backlog_ctl_process();
 }
 
 static void do_test(void)

@@ -84,6 +84,7 @@ void tcpcrypt_setparam(int param, void *val)
 	}
 }
 
+#ifndef __WIN32__
 static void bind_local_unix(int s)
 {
 	struct sockaddr_un sun;
@@ -106,6 +107,7 @@ static void bind_local_unix(int s)
 	if (bind(s, (struct sockaddr *) &sun, sizeof(sa_family_t) + path_len))
 		err(1, "local bind()");
 }
+#endif /* __WIN32__ */
 
 static void ensure_control_socket_open(void)
 {
@@ -118,9 +120,11 @@ static void ensure_control_socket_open(void)
 	if (_conf.cf_s == -1)
 		err(1, "socket()");
 
+#ifndef __WIN32__
 	if (_conf.cf_sa.addr.sa.sa_family == AF_UNIX) {
 		bind_local_unix(_conf.cf_s);
 	}
+#endif
 }
 
 /* Sets fields in `struct tcpcrypt_ctl` given in the pointers `ctl_addr` and

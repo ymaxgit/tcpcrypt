@@ -69,10 +69,10 @@ struct fd;
 typedef void (*fd_cb)(struct fd *fd);
 
 enum {
-	FD_IDLE = 0,
-	FD_READ,
-	FD_WRITE,
-	FD_DEAD
+	FDS_IDLE = 0,
+	FDS_READ,
+	FDS_WRITE,
+	FDS_DEAD
 };
 
 struct fd {
@@ -99,6 +99,7 @@ extern void tcpcryptd(void);
 extern void set_packet_hook(int post, packet_hook hook);
 extern char *driver_param(int x);
 extern char *test_param(int x);
+extern void set_nonblocking(int x);
 
 extern uint64_t xbe64toh(uint64_t x);
 extern uint64_t xhtobe64(uint64_t x);

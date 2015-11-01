@@ -133,11 +133,26 @@ struct ip
     struct in_addr ip_src, ip_dst;      /* source and dest address */
   } __attribute__ ((gcc_struct));
 
+#define  IPTOS_RELIABILITY       0x04
+
+typedef unsigned short int sa_family_t;
+
 struct iovec
   {
     void *iov_base;     /* Pointer to data.  */
     size_t iov_len;     /* Length of data.  */
   };
+
+static void warnx(const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	vprintf(fmt, ap);
+	va_end(ap);
+
+	printf("\n");
+}
 
 static void errx(int eval, const char *fmt, ...)
 {
@@ -152,6 +167,19 @@ static void errx(int eval, const char *fmt, ...)
 	exit(eval);
 }
 
+static void warn(const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	vprintf(fmt, ap);
+	va_end(ap);
+
+	printf(": ");
+	perror("");
+	printf("\n");
+}
+
 static void err(int eval, const char *fmt, ...)
 {
 	va_list ap;
@@ -162,6 +190,7 @@ static void err(int eval, const char *fmt, ...)
 
 	printf(": ");
 	perror("");
+	printf("\n");
 
 	exit(eval);
 }

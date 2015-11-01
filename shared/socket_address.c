@@ -3,8 +3,9 @@
 #include <stddef.h>
 #include <string.h>
 #include <errno.h>
-#include <arpa/inet.h>
+#include <stdint.h>
 
+#include "inc.h"
 #include "socket_address.h"
 
 int socket_address_is_null(const struct socket_address *sa)
@@ -26,6 +27,7 @@ int socket_address_pretty(char *name, size_t size, const struct socket_address *
 	}
 	else {
 		switch (sa->addr.sa.sa_family) {
+#ifndef __WIN32__
 		case AF_UNIX:
 		{
 			size_t path_len = sa->addr_len - sizeof(sa_family_t) - 1;
@@ -45,6 +47,7 @@ int socket_address_pretty(char *name, size_t size, const struct socket_address *
 			}
 			break;
 		}
+#endif /* __WIN32__ */
 		case AF_INET:
 			n = snprintf(name, size, "%s:%d",
 				     inet_ntoa(sa->addr.in.sin_addr),
@@ -63,10 +66,12 @@ const char *socket_address_pathname(const struct socket_address *sa)
 	if (socket_address_is_null(sa))
 		return NULL;
 
+#ifndef __WIN32__
 	if (sa->addr.sa.sa_family == AF_UNIX
 	    && sa->addr_len > 0
 	    && sa->addr.un.sun_path[0] == '/')
 		return sa->addr.un.sun_path;
+#endif
 
 	return NULL;
 }
@@ -114,6 +119,7 @@ int resolve_socket_address_local(const char *descr, struct socket_address *sa,
 	}
 #endif
 
+#ifndef __WIN32__
 	/* path to a unix-domain socket */
 	if (descr[0] == '/') {
 		size_t path_len;
@@ -153,6 +159,7 @@ int resolve_socket_address_local(const char *descr, struct socket_address *sa,
 			       + 1 + len + 1;
 		return 0;
 	}
+#endif /* ! __WIN32__ */
 
 	/* port number at localhost */
 	if (descr[0] == ':') {

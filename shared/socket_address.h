@@ -1,15 +1,14 @@
 #ifndef __TCPCRYPT_SOCKET_ADDRESS_H__
 #define __TCPCRYPT_SOCKET_ADDRESS_H__
 
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <sys/un.h>
+#include "inc.h"
 
 union sockaddr_any {
 	struct sockaddr sa;
 	struct sockaddr_in in;
+#ifndef __WIN32__
 	struct sockaddr_un un;
+#endif
 };
 
 struct socket_address {

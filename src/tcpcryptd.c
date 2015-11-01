@@ -20,7 +20,9 @@
 #include "tcpcrypt_divert.h"
 #include "tcpcrypt.h"
 #include "tcpcryptd.h"
+#ifndef __WIN32__
 #include "priv.h"
+#endif
 #include "profile.h"
 #include "test.h"
 #include "crypto.h"
@@ -435,14 +437,14 @@ static void prepare_ctl(struct network_test *nt)
 }
 
 #ifdef __WIN32__
-static void set_nonblocking(int s)
+void set_nonblocking(int s)
 {
 	u_long mode = 1;
 
 	ioctlsocket(s, FIONBIO, &mode);
 }
 #else
-static void set_nonblocking(int s)
+void set_nonblocking(int s)
 {
 	int flags;
 
@@ -788,7 +790,7 @@ static void do_cycle(void)
                 struct fd *next = fd->fd_next;
 
                 /* unlink dead sockets */
-                if (next->fd_state == FD_DEAD) {
+                if (next->fd_state == FDS_DEAD) {
 			fd->fd_next = next->fd_next;
                         free(next);
                         continue;
@@ -797,14 +799,14 @@ static void do_cycle(void)
                 fd = next;
 
                 switch (fd->fd_state) {
-		case FD_IDLE:
+		case FDS_IDLE:
 			continue;
 
-                case FD_WRITE:
+                case FDS_WRITE:
                         FD_SET(fd->fd_fd, &wr);
                         break;
 
-                case FD_READ:
+                case FDS_READ:
                         FD_SET(fd->fd_fd, &rd);
                         break;
                 }
@@ -842,10 +844,10 @@ static void do_cycle(void)
 	fd = &_fds;
 
 	while ((fd = fd->fd_next)) {
-		if (fd->fd_state == FD_READ && FD_ISSET(fd->fd_fd, &rd))
+		if (fd->fd_state == FDS_READ && FD_ISSET(fd->fd_fd, &rd))
 			fd->fd_cb(fd);
 
-		if (fd->fd_state == FD_WRITE && FD_ISSET(fd->fd_fd, &wr))
+		if (fd->fd_state == FDS_WRITE && FD_ISSET(fd->fd_fd, &wr))
 			fd->fd_cb(fd);
 	}
 
@@ -919,7 +921,7 @@ struct fd *add_fd(int f, fd_cb cb)
 
 	fd->fd_fd    = f;
 	fd->fd_cb    = cb;
-	fd->fd_state = FD_READ;
+	fd->fd_state = FDS_READ;
 	fd->fd_next  = _fds.fd_next;
 	_fds.fd_next = fd;
 

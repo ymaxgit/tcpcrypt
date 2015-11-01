@@ -191,7 +191,7 @@ static void do_kill_rdr(struct tc *tc)
 	tc->tc_state = STATE_DISABLED;
 
 	if (fd) {
-		fd->fd_state = FD_DEAD;
+		fd->fd_state = FDS_DEAD;
 		close(fd->fd_fd);
 		fd->fd_fd = -1;
 		tc->tc_rdr_fd = NULL;
@@ -981,7 +981,11 @@ static void rdr_check_connect(struct tc *tc)
         }
 
         if (e != 0) {
+#ifdef __WIN32__
+		if (e == WSAECONNREFUSED)
+#else
                 if (e == ECONNREFUSED)
+#endif
                         send_rst(tc);
 
 		kill_rdr(tc);
@@ -992,7 +996,7 @@ static void rdr_check_connect(struct tc *tc)
 		tc, tc->tc_rdr_inbound ?  "inbound" : "");
 
 	tc->tc_rdr_connected = 1;
-	fd->fd_state = FD_IDLE;
+	fd->fd_state = FDS_IDLE;
 
 	if (tc->tc_rdr_inbound) {
                 /* we need to manually redirect... */
@@ -3208,7 +3212,7 @@ static void rdr_new_connection(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 			       int flags)
 {
         struct sockaddr_in from, to;
-        int s, nb, rc;
+        int s, rc;
         struct fd *sock;
         socklen_t len;
         int tos = IPTOS_RELIABILITY;
@@ -3245,13 +3249,7 @@ static void rdr_new_connection(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
         if ((s = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1)
                 err(1, "socket()");
 
-        if ((nb = fcntl(s, F_GETFL)) == -1)
-                err(1, "fcntl()");
-
-        nb |= O_NONBLOCK;
-
-        if (fcntl(s, F_SETFL, nb) == -1)
-                err(1, "fcntl()");
+	set_nonblocking(s);
 
 	/* signal handshake to firewall */
         if (setsockopt(s, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)) == -1)
@@ -3263,11 +3261,16 @@ static void rdr_new_connection(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
                 to.sin_addr.s_addr = inet_addr("127.0.0.1");
 	}
 
-        rc = connect(s, (struct sockaddr*) &to, sizeof(to));
-        if (rc == -1 && errno != EINPROGRESS) {
-		close(s);
-		tc->tc_state = STATE_DISABLED;
-		return;
+        if ((rc = connect(s, (struct sockaddr*) &to, sizeof(to))) == -1) {
+#ifdef __WIN32__
+		if (WSAGetLastError() != WSAEWOULDBLOCK) {
+#else
+		if (errno != EINPROGRESS) {
+#endif
+			close(s);
+			tc->tc_state = STATE_DISABLED;
+			return;
+		}
 	}
 
 	/* XXX */
@@ -3295,7 +3298,7 @@ static void rdr_new_connection(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 
         sock = add_fd(s, rdr_remote_handler);
 	sock->fd_priv  = peer;
-	sock->fd_state = FD_WRITE;
+	sock->fd_state = FDS_WRITE;
 
 	peer->tc_rdr_fd      = sock;
 	peer->tc_rdr_state   = STATE_RDR_REMOTE;
@@ -3989,6 +3992,9 @@ static void init_random(void)
 	FILE *f;
 	size_t nread;
 
+#ifdef __WIN32__
+	seed = time(NULL);
+#else
 	path = _conf.cf_random_path;
 	if (path) {
 		if (!(f = fopen(path, "r"))) {
@@ -4012,7 +4018,7 @@ static void init_random(void)
 		}
 		xprintf(XP_ALWAYS, "\n");
 	}
-
+#endif
 	if (seed) {
 		srand(seed);
 		xprintf(XP_DEBUG, "Random seed set to %u\n", seed);
@@ -4106,8 +4112,8 @@ static void redirect_listen_handler(struct fd *fd)
 		ntohs(peer->tc_rdr_addr.sin_port));
 
 	/* wake up peer */
-	if (peer->tc_rdr_fd->fd_state == FD_IDLE)
-		peer->tc_rdr_fd->fd_state = FD_READ;
+	if (peer->tc_rdr_fd->fd_state == FDS_IDLE)
+		peer->tc_rdr_fd->fd_state = FDS_READ;
 }
 
 static void init_rdr(void)

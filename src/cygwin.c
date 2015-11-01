@@ -31,7 +31,7 @@ extern int do_divert_read(int s, void *buf, int len);
 extern int do_divert_write(int s, void *buf, int len);
 extern void do_divert_close(int s);
 
-int divert_open(int port, divert_cb cb)
+static int divert_open(int port, divert_cb cb)
 {
 	_s  = do_divert_open();
 	_cb = cb;
@@ -39,7 +39,7 @@ int divert_open(int port, divert_cb cb)
 	return _s;
 }
 
-void divert_close(void)
+static void divert_close(void)
 {
 	do_divert_close(_s);
 }
@@ -91,7 +91,7 @@ static void do_divert_next_packet(unsigned char *buf, int rc)
 	}
 }
 
-void divert_next_packet(int s)
+static void divert_next_packet(int s)
 {
 	unsigned char buf[2048];
 	int rc;
@@ -106,7 +106,7 @@ void divert_next_packet(int s)
 	do_divert_next_packet(buf, rc);
 }
 
-void divert_inject(void *data, int len)
+static void divert_inject(void *data, int len)
 {
 	struct packet *p, *p2;
 	unsigned short *et;
@@ -139,7 +139,7 @@ void divert_inject(void *data, int len)
 	p2->p_next = p;
 }
 
-void divert_cycle(void)
+static void divert_cycle(void)
 {
 	struct packet *p = _outbound.p_next;
 
@@ -154,4 +154,17 @@ void divert_cycle(void)
 	}
 
 	_outbound.p_next = NULL;
+}
+
+struct divert *divert_get(void)
+{
+        static struct divert _divert_win = {
+                .open           = divert_open,
+                .next_packet    = divert_next_packet,
+                .close          = divert_close,
+                .inject         = divert_inject,
+		.cycle		= divert_cycle,
+        };
+
+        return &_divert_win;
 }

@@ -2826,7 +2826,6 @@ static int tcp_input_post(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	case STATE_REKEY_SENT:
 	case STATE_REKEY_RCVD:
 	case STATE_DISABLED:
-	case STATE_INIT2_SENT:
 		break;
 
 	default:

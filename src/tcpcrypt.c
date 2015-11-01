@@ -1425,7 +1425,13 @@ static int do_output_init2_sent(struct tc *tc, struct ip *ip,
 
 		return DIVERT_DROP;
 	} else {
-#if 1
+		/* Let the ACK of INIT2 enable encryption.  Less efficient when
+		 * servers send first because we wait for that ACK to open up
+		 * window and let kernel send packets.
+		 *
+		 * Otherwise, be careful not to encrypt retransmits.
+		 */
+#if 0
 		enable_encryption(tc);
 #endif
 	}
@@ -2820,7 +2826,6 @@ static int tcp_input_post(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	case STATE_REKEY_SENT:
 	case STATE_REKEY_RCVD:
 	case STATE_DISABLED:
-	case STATE_INIT2_SENT:
 		break;
 
 	default:

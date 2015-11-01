@@ -45,6 +45,7 @@ lib_libtcpcrypt_ladir = $(includedir)/tcpcrypt
 lib_libtcpcrypt_la_HEADERS = include/tcpcrypt/tcpcrypt.h
 lib_libtcpcrypt_la_SOURCES = \
 	lib/sockopt.c \
+	shared/socket_address.c shared/socket_address.h \
 	src/tcpcrypt_ctl.h \
 	lib/libtcpcrypt.sym
 
@@ -71,6 +72,7 @@ if OS_MINGW
 util_tcnetstat_LDADD += -lwsock32 -liphlpapi
 endif
 
+util_tcnetstat_CFLAGS = $(AM_CFLAGS)
 
 # util_tcs
 
@@ -80,6 +82,7 @@ util_tcs_SOURCES = util/tcs.c \
 
 util_tcs_LDADD = lib/libtcpcrypt.la $(PRIV_LDADD)
 
+util_tcs_CFLAGS = $(AM_CFLAGS)
 
 # src_tcpcryptd
 
@@ -116,6 +119,7 @@ if !NO_ASM
 src_tcpcryptd_SOURCES += src/checksum_32.S
 endif
 
+src_tcpcryptd_CFLAGS = $(AM_CFLAGS)
 
 # tests/
 

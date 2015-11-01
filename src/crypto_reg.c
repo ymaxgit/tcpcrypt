@@ -45,7 +45,7 @@ static struct crypt_pub *ECDHE_HKDF_new(struct crypt*(*ctr)(void), int klen)
 	cp->cp_n_s           = 32;
 	cp->cp_k_len         = 32;
 	cp->cp_max_key       = (4096 / 8);
-	cp->cp_cipher_len    = 1 + cp->cp_n_s + klen;
+	cp->cp_cipher_len    = cp->cp_n_s + klen;
 	cp->cp_key_agreement = 1;
 
 	return cp;
@@ -53,34 +53,46 @@ static struct crypt_pub *ECDHE_HKDF_new(struct crypt*(*ctr)(void), int klen)
 
 static struct crypt_pub *ECDHE256_HKDF_new(void)
 {
-	return ECDHE_HKDF_new(crypt_ECDHE256_new, 65);
+	return ECDHE_HKDF_new(crypt_ECDHE256_new, 65 + 2);
 }
 
 static struct crypt_pub *ECDHE521_HKDF_new(void)
 {
-	return ECDHE_HKDF_new(crypt_ECDHE521_new, 133);
+	return ECDHE_HKDF_new(crypt_ECDHE521_new, 133 + 2);
 }
 
-static struct crypt_sym *AES_HMAC_new(void)
+static struct crypt_sym *AES_GCM_new(struct crypt*(*ctr)(void), int mlen,
+				     int klen)
 {
 	struct crypt_sym *cs = xmalloc(sizeof(*cs));
 
 	memset(cs, 0, sizeof(*cs));
 
-	cs->cs_cipher  = crypt_AES_new();
-	cs->cs_mac     = crypt_HMAC_SHA256_new();
-	cs->cs_ack_mac = crypt_AES_new();
-	cs->cs_mac_len = (128 / 8);
+	cs->cs_cipher  = ctr();
+	cs->cs_mac     = ctr();
+	cs->cs_ack_mac = ctr();
+	cs->cs_mac_len = mlen;
+	cs->cs_key_len = klen;
 
 	return cs;
 }
 
-static void register_pub(unsigned int id, struct crypt_pub *(*ctr)(void))
+static struct crypt_sym *AES128_GCM_new(void)
+{
+	return AES_GCM_new(crypt_AES128_new, 16, 128 / 8);
+}
+
+static struct crypt_sym *AES256_GCM_new(void)
+{
+	return AES_GCM_new(crypt_AES256_new, 16, 256 / 8);
+}
+
+static void register_pub(uint8_t id, struct crypt_pub *(*ctr)(void))
 {
 	crypt_register(TYPE_PKEY, id, (crypt_ctr) ctr);
 }
 
-static void register_sym(unsigned int id, struct crypt_sym *(*ctr)(void))
+static void register_sym(uint8_t id, struct crypt_sym *(*ctr)(void))
 {
 	crypt_register(TYPE_SYM, id, (crypt_ctr) ctr);
 }
@@ -89,9 +101,9 @@ static void __register_ciphers(void) __attribute__ ((constructor));
 
 static void __register_ciphers(void)
 {
-	register_pub(TC_CIPHER_OAEP_RSA_3, RSA_HKDF_new);
 	register_pub(TC_CIPHER_ECDHE_P256, ECDHE256_HKDF_new);
 	register_pub(TC_CIPHER_ECDHE_P521, ECDHE521_HKDF_new);
 
-	register_sym(TC_AES128_HMAC_SHA2, AES_HMAC_new);
+	register_sym(TC_AES128_GCM, AES128_GCM_new);
+	register_sym(TC_AES256_GCM, AES256_GCM_new);
 }

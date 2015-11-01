@@ -3,7 +3,7 @@
 #include <devguid.h>
 
 #include "resource.h"
-#include "../../user/src/tcpcrypt_version.h"
+#include "../../src/tcpcrypt_version.h"
 
 #define COBJMACROS
 
@@ -95,7 +95,7 @@ static void start()
 
 	get_path(cmd);
 	snprintf(cmd + strlen(cmd), sizeof(cmd) - strlen(cmd), "tcpcryptd.exe");
-	snprintf(arg, sizeof(arg), "%s", "tcpcryptd.exe");
+	snprintf(arg, sizeof(arg), "%s -u :65532", "tcpcryptd.exe");
 
 	memset(&si, 0, sizeof(si));
 	si.cb		 = sizeof(si);
@@ -160,7 +160,7 @@ static void netstat()
 	si.wShowWindow   = SW_HIDE;
 
 	if (!CreateProcess(cmd,
-		      NULL,
+		      "tcnetstat.exe -u :65532",
 		      NULL,
 		      NULL,
 		      TRUE,

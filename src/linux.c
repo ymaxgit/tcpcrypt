@@ -1,6 +1,8 @@
 #include <netinet/in.h>
 #include <linux/netfilter.h>
 #include <libnetfilter_queue/libnetfilter_queue.h>
+#include <libnetfilter_conntrack/libnetfilter_conntrack.h>
+#include <libnetfilter_conntrack/libnetfilter_conntrack_tcp.h>
 #include <netinet/ip.h>
 #include <err.h>
 #include <stdio.h>
@@ -10,6 +12,10 @@
 #include <assert.h>
 #include <netinet/ip.h>
 #include <fcntl.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <arpa/inet.h>
 #define __FAVOR_BSD
 #include <netinet/tcp.h>
 
@@ -21,6 +27,14 @@
 static struct nfq_handle    *_h;
 static struct nfq_q_handle  *_q;
 static unsigned int	    _mark;
+static struct nfct_handle   *_ct;
+
+static struct ct_arg {
+	struct sockaddr_in	*ct_to;
+	struct ip		*ct_ip;
+	int			*ct_flags;
+	int			ct_rc;
+} _ct_arg;
 
 static int packet_input(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
               		struct nfq_data *nfa, void *data)
@@ -90,7 +104,63 @@ static int packet_input(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
 	return 0;
 }
 
-int divert_open(int port, divert_cb cb)
+static int conntrack_find(enum nf_conntrack_msg_type type,
+			  struct nf_conntrack *ct,
+			  void *data)
+{
+	struct ct_arg *arg = data;
+	int *flags = arg->ct_flags;
+	struct sockaddr_in *to = arg->ct_to;
+	struct ip *ip = arg->ct_ip;
+	struct tcphdr *tcp = (struct tcphdr*) ((unsigned long) ip
+                                               + ip->ip_hl * 4);
+
+	if (arg->ct_rc == 0)
+		return NFCT_CB_CONTINUE;
+
+#if 0
+	char buf[1024];
+	nfct_snprintf(buf, sizeof(buf), ct, type, NFCT_O_DEFAULT, 0);
+	printf("YO [%s]\n", buf);
+	return NFCT_CB_CONTINUE;
+#endif
+
+	if (nfct_get_attr_u32(ct, ATTR_IPV4_SRC) != ip->ip_src.s_addr)
+		return NFCT_CB_CONTINUE;
+
+	if (nfct_get_attr_u16(ct, ATTR_PORT_SRC) != tcp->th_sport)
+		return NFCT_CB_CONTINUE;
+
+	switch (nfct_get_attr_u8(ct, ATTR_TCP_STATE)) {
+	case TCP_CONNTRACK_SYN_RECV:
+		*flags = DF_IN;
+		break;
+
+	case TCP_CONNTRACK_SYN_SENT:
+		*flags = 0;
+		break;
+
+	default:
+		return NFCT_CB_CONTINUE;
+	}
+
+	to->sin_addr.s_addr = nfct_get_attr_u32(ct, ATTR_ORIG_IPV4_DST);
+	to->sin_port        = nfct_get_attr_u16(ct, ATTR_ORIG_PORT_DST);
+
+	arg->ct_rc = 0;
+
+	return NFCT_CB_CONTINUE;
+}
+
+static void conntrack_open(void)
+{
+	if (!(_ct = nfct_open(CONNTRACK, 0)))
+		err(1, "nfct_open()");
+
+	nfct_callback_register(_ct, NFCT_T_ALL, conntrack_find, &_ct_arg);
+}
+
+static int linux_open(int port, divert_cb cb)
 {
 	unsigned int bufsize = 1024 * 1024 * 1;
 	unsigned int rc;
@@ -142,21 +212,25 @@ int divert_open(int port, divert_cb cb)
 	if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1)
 		err(1, "fcntl()");
 
-	open_raw();
+	raw_open();
+	conntrack_open();
 
 	return fd;
 }
 
-void divert_close(void)
+static void linux_close(void)
 {
         if (_q)
                 nfq_destroy_queue(_q);
 
         if (_h)
                 nfq_close(_h);
+
+	if (_ct)
+		nfct_close(_ct);
 }
 
-void divert_next_packet(int s)
+static void linux_next_packet(int s)
 {
 	char buf[2048];
 	int rc;
@@ -175,4 +249,41 @@ void divert_next_packet(int s)
 		errx(1, "EOF");
 
 	nfq_handle_packet(_h, buf, rc);
+}
+
+static int linux_orig_dest(struct sockaddr_in *to, struct ip *ip, int *flags)
+{
+	int family = AF_INET;
+	struct ct_arg *arg = &_ct_arg;
+
+	memset(arg, 0, sizeof(*arg));
+
+	arg->ct_to    = to;
+	arg->ct_ip    = ip;
+	arg->ct_flags = flags;
+	arg->ct_rc    = -1;
+
+	/* XXX have specific filter */
+	if (nfct_query(_ct, NFCT_Q_DUMP, &family) < 0)
+		err(1, "nfct_query()");
+
+	return arg->ct_rc;
+}
+
+struct divert *divert_get(void)
+{
+	static struct divert _divert_linux = {
+		.open		= linux_open,
+		.next_packet	= linux_next_packet,
+		.close		= linux_close,
+		.inject		= raw_inject,
+		.orig_dest	= linux_orig_dest,
+	};
+
+        if (_conf.cf_rdr) {
+                struct divert *pcap = divert_get_pcap();
+                _divert_linux.inject = pcap->inject;
+        }
+
+	return &_divert_linux;
 }

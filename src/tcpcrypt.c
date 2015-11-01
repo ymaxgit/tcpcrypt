@@ -5,6 +5,8 @@
 #include <assert.h>
 #include <errno.h>
 #include <time.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "inc.h"
 #include "util.h"
@@ -55,7 +57,8 @@ static int			_pkey_len;
 static struct tc_scipher	_sym[MAX_CIPHERS];
 static int			_sym_len;
 
-typedef int (*opt_cb)(struct tc *tc, int tcpop, int subop, int len, void *data);
+typedef int (*opt_cb)(struct tc *tc, int tcpop, int len, void *data);
+typedef int (*sm_cb)(struct tc_seq *s, uint32_t seq);
 
 static void *get_free(struct freelist *f, unsigned int sz)
 {
@@ -181,6 +184,35 @@ static void crypto_free_keyset(struct tc *tc, struct tc_keyset *ks)
 		crypt_sym_destroy(ks->tc_alg_rx);
 }
 
+static void do_kill_rdr(struct tc *tc)
+{
+	struct fd *fd = tc->tc_rdr_fd;
+
+	tc->tc_state = STATE_DISABLED;
+
+	if (fd) {
+		fd->fd_state = FDS_DEAD;
+		close(fd->fd_fd);
+		fd->fd_fd = -1;
+		tc->tc_rdr_fd = NULL;
+	}
+}
+
+static void kill_rdr(struct tc *tc)
+{
+	struct tc *peer = tc->tc_rdr_peer;
+
+	do_kill_rdr(tc);
+
+	if (peer) {
+		assert(peer->tc_rdr_peer = tc);
+
+		/* XXX will still leak conn and tc (if we don't receive other
+		 * packets) */
+		do_kill_rdr(peer);
+	}
+}
+
 static void tc_finish(struct tc *tc)
 {
 	if (tc->tc_crypt_pub)
@@ -199,6 +231,8 @@ static void tc_finish(struct tc *tc)
 
 	if (tc->tc_sess)
 		tc->tc_sess->ts_used = 0;
+
+	kill_rdr(tc);
 }
 
 static struct tc *tc_dup(struct tc *tc)
@@ -235,19 +269,11 @@ static void compute_nextk(struct tc *tc, struct stuff *out)
 static void compute_mk(struct tc *tc, struct stuff *out)
 {
 	int len = tc->tc_crypt_pub->cp_k_len;
-	unsigned char tag[2];
-	unsigned char app_support = 0;
-	int pos = tc->tc_role == ROLE_SERVER ? 1 : 0;
+	unsigned char tag = CONST_REKEY;
 
 	assert(len <= sizeof(out->s_data));
 
-	app_support |= (tc->tc_app_support & 1)	<< pos;
-	app_support |= (tc->tc_app_support >> 1) << (!pos);
-
-	tag[0] = CONST_REKEY;
-	tag[1] = app_support;
-
-	crypt_expand(tc->tc_crypt_pub->cp_hkdf, tag, sizeof(tag), out->s_data,
+	crypt_expand(tc->tc_crypt_pub->cp_hkdf, &tag, sizeof(tag), out->s_data,
 		     len);
 
 	out->s_len = len;
@@ -284,6 +310,7 @@ static void session_cache(struct tc *tc)
 		s->ts_role 	 = tc->tc_role;
 		s->ts_ip   	 = tc->tc_dst_ip;
 		s->ts_port 	 = tc->tc_dst_port;
+		s->ts_pub_spec   = tc->tc_cipher_pkey.tcs_algo;
 		s->ts_pub	 = crypt_new(tc->tc_crypt_pub->cp_ctr);
 		s->ts_sym	 = crypt_new(tc->tc_crypt_sym->cs_ctr);
 	}
@@ -308,18 +335,9 @@ static void init_algo(struct tc *tc, struct crypt_sym *cs,
 
 	cs = *algo;
 
-	crypt_set_key(cs->cs_cipher, keys->tk_enc.s_data, keys->tk_enc.s_len);
-	crypt_set_key(cs->cs_mac, keys->tk_mac.s_data, keys->tk_mac.s_len);
-	crypt_set_key(cs->cs_ack_mac, keys->tk_ack.s_data, keys->tk_ack.s_len);
-}
+	assert(keys->tk_prk.s_len >= cs->cs_key_len);
 
-static void compute_asm_keys(struct tc *tc, struct tc_keys *tk)
-{
-	set_expand_key(tc, &tk->tk_prk);
-
-	do_expand(tc, CONST_KEY_ENC, &tk->tk_enc);
-	do_expand(tc, CONST_KEY_MAC, &tk->tk_mac);
-	do_expand(tc, CONST_KEY_ACK, &tk->tk_ack);
+	crypt_set_key(cs->cs_cipher, keys->tk_prk.s_data, cs->cs_key_len);
 }
 
 static void compute_keys(struct tc *tc, struct tc_keyset *out)
@@ -334,9 +352,6 @@ static void compute_keys(struct tc *tc, struct tc_keyset *out)
 	do_expand(tc, CONST_KEY_S, &out->tc_server.tk_prk);
 
 	profile_add(1, "compute keys calculated keys");
-
-	compute_asm_keys(tc, &out->tc_client);
-	compute_asm_keys(tc, &out->tc_server);
 
 	switch (tc->tc_role) {
 	case ROLE_CLIENT:
@@ -514,6 +529,27 @@ static void sockopt_clear(unsigned short port)
 	_sockopts[port] = NULL;
 }
 
+struct tcphdr *get_tcp(struct ip *ip)
+{
+        return (struct tcphdr*) ((unsigned long) ip + ip->ip_hl * 4);
+}
+
+static void do_inject_ip(struct ip *ip)
+{
+	xprintf(XP_NOISY, "Injecting ");
+	print_packet(ip, get_tcp(ip), 0, NULL);
+
+	_divert->inject(ip, ntohs(ip->ip_len));
+}
+
+static void inject_ip(struct ip *ip)
+{
+	if (_conf.cf_rdr)
+		return;
+
+	do_inject_ip(ip);
+}
+
 static void retransmit(void *a)
 {
 	struct tc *tc = a;
@@ -530,7 +566,7 @@ static void retransmit(void *a)
 
 	ip = (struct ip*) tc->tc_retransmit->r_packet;
 
-	divert_inject(ip, ntohs(ip->ip_len));
+	inject_ip(ip);
 
 	/* XXX decay */
 	tc->tc_retransmit->r_timer = add_timer(tc->tc_rto, retransmit, tc);
@@ -553,21 +589,23 @@ static void add_connection(struct conn *c)
 	head->c_next = c;
 }
 
-static struct tc *new_connection(struct ip *ip, struct tcphdr *tcp, int flags)
+static struct tc *do_new_connection(uint32_t saddr, uint16_t sport,
+				    uint32_t daddr, uint16_t dport,
+				    int in)
 {
 	struct tc *tc;
 	struct conn *c;
-	int idx = flags & DF_IN ? 1 : 0;
+	int idx = in ? 1 : 0;
 
 	c = get_connection();
 	assert(c);
 	profile_add(2, "alloc connection");
 
 	memset(c, 0, sizeof(*c));
-	c->c_addr[idx].sin_addr.s_addr  = ip->ip_src.s_addr;
-	c->c_addr[idx].sin_port         = tcp->th_sport;
-	c->c_addr[!idx].sin_addr.s_addr = ip->ip_dst.s_addr;
-	c->c_addr[!idx].sin_port        = tcp->th_dport;
+	c->c_addr[idx].sin_addr.s_addr  = saddr;
+	c->c_addr[idx].sin_port         = sport;
+	c->c_addr[!idx].sin_addr.s_addr = daddr;
+	c->c_addr[!idx].sin_port        = dport;
 	profile_add(2, "setup connection");
 
 	tc = sockopt_find_port(c->c_addr[0].sin_port);
@@ -584,7 +622,7 @@ static struct tc *new_connection(struct ip *ip, struct tcphdr *tcp, int flags)
 		/* For servers, we gotta duplicate options on child sockets.
 		 * For clients, we just steal it.
 		 */
-		if (flags & DF_IN)
+		if (in)
 			tc = tc_dup(tc);
 		else
 			sockopt_clear(c->c_addr[0].sin_port);
@@ -599,6 +637,13 @@ static struct tc *new_connection(struct ip *ip, struct tcphdr *tcp, int flags)
 	add_connection(c);	
 
 	return tc;
+}
+
+static struct tc *new_connection(struct ip *ip, struct tcphdr *tcp, int flags)
+{
+	return do_new_connection(ip->ip_src.s_addr, tcp->th_sport,
+				 ip->ip_dst.s_addr, tcp->th_dport,
+				 flags & DF_IN);
 }
 
 static void do_remove_connection(struct tc *tc, struct conn *prev)
@@ -710,63 +755,6 @@ static void *find_opt(struct tcphdr *tcp, unsigned char opt)
 	return NULL;
 }
 
-static struct tc_subopt *find_subopt(struct tcphdr *tcp, unsigned char op)
-{
-	struct tcpopt_crypt *toc;
-	struct tc_subopt *tcs;
-	int len;
-	int optlen;
-
-	toc = find_opt(tcp, TCPOPT_CRYPT);
-	if (!toc)
-		return NULL;
-
-	len = toc->toc_len - sizeof(*toc);
-	assert(len >= 0);
-
-	if (len == 0 && op == TCOP_HELLO)
-		return (struct tc_subopt*) 0xbad;
-
-	tcs = &toc->toc_opts[0];
-	while (len > 0) {
-		if (len < 1)
-			return NULL;
-
-		if (tcs->tcs_op <= 0x3f)
-			optlen = 1;
-		else if (tcs->tcs_op >= 0x80) {
-			switch (tcs->tcs_op) {
-			case TCOP_NEXTK1:
-			case TCOP_NEXTK1_SUPPORT:
-				optlen = 10;
-				break;
-
-			case TCOP_REKEY:
-				/* XXX depends on cipher */
-				optlen = sizeof(struct tco_rekeystream);
-				break;
-
-			default:
-				errx(1, "Unknown option %d", tcs->tcs_op);
-				break;
-			}
-		} else
-			optlen = tcs->tcs_len;
-
-		if (optlen > len)
-			return NULL;
-
-		if (tcs->tcs_op == op)
-			return tcs;
-
-		len -= optlen;
-		tcs = (struct tc_subopt*) ((unsigned long) tcs + optlen);
-	}
-	assert(len == 0);
-
-	return NULL;
-}
-
 static void checksum_packet(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
 	checksum_ip(ip);
@@ -787,67 +775,6 @@ static void set_ip_len(struct ip *ip, unsigned short len)
 	sum	   = (sum >> 16) + (sum & 0xffff);
 	sum	  += (sum >> 16);
 	ip->ip_sum = htons(~sum);
-}
-
-static int foreach_subopt(struct tc *tc, int len, void *data, opt_cb cb)
-{
-	struct tc_subopt *tcs = (struct tc_subopt*) data;
-	int optlen = 0;
-	unsigned char *d;
-
-	assert(len >= 0);
-
-	if (len == 0)
-		return cb(tc, -1, TCOP_HELLO, optlen, tcs);
-
-	while (len > 0) {
-		d = (unsigned char *) tcs;
-
-		if (len < 1)
-			goto __bad;
-
-		if (tcs->tcs_op <= 0x3f)
-			optlen = 1;
-		else if (tcs->tcs_op >= 0x80) {
-			d++;
-			switch (tcs->tcs_op) {
-			case TCOP_NEXTK1:
-			case TCOP_NEXTK1_SUPPORT:
-				optlen = 10;
-				break;
-
-			case TCOP_REKEY:
-				/* XXX depends on cipher */
-				optlen = sizeof(struct tco_rekeystream);
-				break;
-
-			default:
-				errx(1, "Unknown option %d", tcs->tcs_op);
-				break;
-			}
-		} else {
-			if (len < 2)
-				goto __bad;
-			optlen = tcs->tcs_len;
-			d = tcs->tcs_data;
-		}
-
-		if (optlen > len)
-			goto __bad;
-
-		if (cb(tc, -1, tcs->tcs_op, optlen, d))
-			return 1;
-
-		len -= optlen;
-		tcs  = (struct tc_subopt*) ((unsigned long) tcs + optlen);
-	}
-
-	assert(len == 0);
-
-	return 0;
-__bad:
-	xprintf(XP_ALWAYS, "bad\n");
-	return 1;
 }
 
 static void foreach_opt(struct tc *tc, struct tcphdr *tcp, opt_cb cb)
@@ -884,13 +811,8 @@ static void foreach_opt(struct tc *tc, struct tcphdr *tcp, opt_cb cb)
 			break;
 		}
 
-		if (o == TCPOPT_CRYPT) {
-			if (foreach_subopt(tc, l, p, cb))
-				return;
-		} else {
-			if (cb(tc, o, -1, l, p))
-				return;
-		}
+		if (cb(tc, o, l, p))
+			return;
 
 		p   += l;
 		len -= l;
@@ -898,7 +820,7 @@ static void foreach_opt(struct tc *tc, struct tcphdr *tcp, opt_cb cb)
 	assert(len == 0);
 }
 
-static int do_ops_len(struct tc *tc, int tcpop, int subop, int len, void *data)
+static int do_ops_len(struct tc *tc, int tcpop, int len, void *data)
 {
 	tc->tc_optlen += len + 2;
 
@@ -967,22 +889,6 @@ static void *tcp_opts_alloc(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 	return p;
 }
 
-static struct tc_subopt *subopt_alloc(struct tc *tc, struct ip *ip,
-				      struct tcphdr *tcp, int len)
-{
-	struct tcpopt_crypt *toc;
-
-	len += sizeof(*toc);
-	toc = tcp_opts_alloc(tc, ip, tcp, len);
-	if (!toc)
-		return NULL;
-
-	toc->toc_kind = TCPOPT_CRYPT;
-	toc->toc_len  = len;
-
-	return toc->toc_opts;
-}
-
 static struct tc_sess *session_find_host(struct tc *tc, struct in_addr *in,
 					 int port)
 {
@@ -1001,9 +907,118 @@ static struct tc_sess *session_find_host(struct tc *tc, struct in_addr *in,
 	return NULL;
 }
 
+static int do_set_eno_transcript(struct tc *tc, int tcpop, int len, void *data)
+{
+	uint8_t *p = &tc->tc_eno[tc->tc_eno_len];
+
+	if (tcpop != TCPOPT_ENO)
+		return 0;
+
+	assert(len + 2 + tc->tc_eno_len < sizeof(tc->tc_eno));
+
+	*p++ = TCPOPT_ENO;
+	*p++ = len + 2;
+
+	memcpy(p, data, len);
+
+	tc->tc_eno_len += 2 + len;
+
+	return 0;
+}
+
+static void set_eno_transcript(struct tc *tc, struct tcphdr *tcp)
+{
+	unsigned char *p;
+
+	foreach_opt(tc, tcp, do_set_eno_transcript);
+
+	assert(tc->tc_eno_len + 2 < sizeof(tc->tc_eno));
+
+	p = &tc->tc_eno[tc->tc_eno_len];
+	*p++ = TCPOPT_ENO;
+	*p++ = 2;
+
+	tc->tc_eno_len += 2;
+}
+
+static void send_rst(struct tc *tc)
+{
+        struct ip *ip = (struct ip*) tc->tc_rdr_buf;
+        struct tcphdr *tcp = (struct tcphdr*) get_tcp(ip);
+        struct in_addr addr;
+        int port;
+
+        addr.s_addr = ip->ip_src.s_addr;
+        ip->ip_src.s_addr = ip->ip_dst.s_addr;
+        ip->ip_dst.s_addr = addr.s_addr;
+
+        port = tcp->th_sport;
+        tcp->th_sport = tcp->th_dport;
+        tcp->th_dport = port;
+
+        tcp->th_flags = TH_RST | TH_ACK;
+        tcp->th_ack   = htonl(ntohl(tcp->th_seq) + 1);
+        tcp->th_seq   = htonl(0);
+
+	checksum_packet(tc, ip, tcp);
+
+	xprintf(XP_ALWAYS, "Sending RST\n");
+
+        do_inject_ip(ip);
+}
+
+static void rdr_check_connect(struct tc *tc)
+{
+        int e;
+        socklen_t len = sizeof(e);
+	struct fd *fd = tc->tc_rdr_fd;
+        struct ip *ip = (struct ip*) tc->tc_rdr_buf;
+
+        if (getsockopt(fd->fd_fd, SOL_SOCKET, SO_ERROR, &e, &len) == -1) {
+                perror("getsockopt()");
+		kill_rdr(tc);
+                return;
+        }
+
+        if (e != 0) {
+#ifdef __WIN32__
+		if (e == WSAECONNREFUSED)
+#else
+                if (e == ECONNREFUSED)
+#endif
+                        send_rst(tc);
+
+		kill_rdr(tc);
+                return;
+        }
+
+	xprintf(XP_NOISY, "Connected %p %s\n",
+		tc, tc->tc_rdr_inbound ?  "inbound" : "");
+
+	tc->tc_rdr_connected = 1;
+	fd->fd_state = FDS_IDLE;
+
+	if (tc->tc_rdr_inbound) {
+                /* we need to manually redirect... */
+                struct tcphdr *tcp = get_tcp(ip);
+
+                ip->ip_dst.s_addr = inet_addr("127.0.0.1");
+                tcp->th_dport = htons(REDIRECT_PORT);
+                checksum_packet(tc, ip, tcp);
+	}
+
+	/* inject the local SYN so that user connects to proxy */
+	if (!tc->tc_rdr_peer->tc_rdr_drop_sa)
+		do_inject_ip(ip);
+}
+
 static int do_output_closed(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
 	struct tc_sess *ts = tc->tc_sess;
+	struct tcpopt_eno *eno;
+	struct tc_sess_opt *sopt;
+	int len;
+	uint8_t *p;
 
 	tc->tc_dir = DIR_OUT;
 
@@ -1013,50 +1028,47 @@ static int do_output_closed(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	if (!ts && !tc->tc_nocache)
 		ts = session_find_host(tc, &ip->ip_dst, tcp->th_dport);
 
+	len = sizeof(*eno) + tc->tc_ciphers_pkey_len;
+
+	if (tc->tc_app_support)
+		len += 1;
+
+	if (ts)
+		len += sizeof(*sopt);
+
+	eno = tcp_opts_alloc(tc, ip, tcp, len);
+	if (!eno) {
+		xprintf(XP_ALWAYS, "No space for hello\n");
+		tc->tc_state = STATE_DISABLED;
+
+		/* XXX try without session resumption */
+
+		return DIVERT_ACCEPT;
+	}
+
+	eno->toe_kind = TCPOPT_ENO;
+	eno->toe_len  = len;
+
+	memcpy(eno->toe_opts, tc->tc_ciphers_pkey, tc->tc_ciphers_pkey_len);
+
+	p = eno->toe_opts + tc->tc_ciphers_pkey_len;
+
+	if (tc->tc_app_support)
+		*p++ = tc->tc_app_support << 1;
+
+	tc->tc_state = STATE_HELLO_SENT;
+
 	if (!ts) {
-		struct tcpopt_crypt *toc;
-		int len = sizeof(*toc);
-
-		if (tc->tc_app_support)
-			len++;
-
-		toc = tcp_opts_alloc(tc, ip, tcp, len);
-		if (!toc) {
-			xprintf(XP_ALWAYS, "No space for hello\n");
-			tc->tc_state = STATE_DISABLED;
-
-			return DIVERT_ACCEPT;
-		}
-
-		toc->toc_kind = TCPOPT_CRYPT;
-		toc->toc_len  = len;
-
-		if (tc->tc_app_support)
-			toc->toc_opts[0].tcs_op = TCOP_HELLO_SUPPORT;
-
-		tc->tc_state = STATE_HELLO_SENT;
-
 		if (!_conf.cf_nocache)
 			xprintf(XP_DEBUG, "Can't find session for host\n");
 	} else {
 		/* session caching */
-		struct tc_subopt *tcs;
-		int len = 1 + sizeof(struct tc_sid);
+		sopt = (struct tc_sess_opt*) p;
 
-		tcs = subopt_alloc(tc, ip, tcp, len);
-		if (!tcs) {
-			xprintf(XP_ALWAYS, "No space for NEXTK1\n");
-			tc->tc_state = STATE_DISABLED;
+		sopt->ts_opt = TC_RESUME | TC_OPT_VLEN;
 
-			return DIVERT_ACCEPT;
-		}
-
-		tcs->tcs_op = tc->tc_app_support ? TCOP_NEXTK1_SUPPORT
-						 : TCOP_NEXTK1;
-
-		assert(ts->ts_sid.s_len >= sizeof(struct tc_sid));
-		memcpy(&tcs->tcs_len, &ts->ts_sid.s_data,
-		       sizeof(struct tc_sid));
+		assert(ts->ts_sid.s_len >= sizeof(sopt->ts_sid));
+		memcpy(&sopt->ts_sid, &ts->ts_sid.s_data, sizeof(sopt->ts_sid));
 
 		tc->tc_state = STATE_NEXTK1_SENT;
 		assert(!ts->ts_used || ts == tc->tc_sess);
@@ -1064,52 +1076,193 @@ static int do_output_closed(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 		ts->ts_used  = 1;
 	}
 
+	tc->tc_eno_len = 0;
+	set_eno_transcript(tc, tcp);
+
 	return DIVERT_MODIFY;
 }
 
 static int do_output_hello_rcvd(struct tc *tc, struct ip *ip,
 				struct tcphdr *tcp)
 {
-	struct tc_subopt *tcs;
+	struct tcpopt_eno *eno;
 	int len;
+	int app_support = tc->tc_app_support & 1;
 
-	if (tc->tc_cmode == CMODE_ALWAYS) {
-		tcs = subopt_alloc(tc, ip, tcp, 1);
-		if (!tcs) {
-			xprintf(XP_ALWAYS, "No space for HELLO\n");
-			tc->tc_state = STATE_DISABLED;
+	len = sizeof(*eno) + sizeof(tc->tc_cipher_pkey);
 
-			return DIVERT_ACCEPT;
-		}
+	if (app_support)
+		len++;
 
-		tcs->tcs_op = TCOP_HELLO;
-
-		tc->tc_state = STATE_HELLO_SENT;
-
-		return DIVERT_MODIFY;
-	}
-
-	len = sizeof(*tcs) + tc->tc_ciphers_pkey_len;
-	tcs = subopt_alloc(tc, ip, tcp, len);
-	if (!tcs) {
-		xprintf(XP_ALWAYS, "No space for PKCONF\n");
+	eno = tcp_opts_alloc(tc, ip, tcp, len);
+	if (!eno) {
+		xprintf(XP_ALWAYS, "No space for ENO\n");
 		tc->tc_state = STATE_DISABLED;
+
 		return DIVERT_ACCEPT;
 	}
 
-	tcs->tcs_op  = (tc->tc_app_support & 1) ? TCOP_PKCONF_SUPPORT
-						: TCOP_PKCONF;
-	tcs->tcs_len = len;
+	eno->toe_kind = TCPOPT_ENO;
+	eno->toe_len  = len;
 
-	memcpy(tcs->tcs_data, tc->tc_ciphers_pkey, tc->tc_ciphers_pkey_len);
+	memcpy(eno->toe_opts, &tc->tc_cipher_pkey, sizeof(tc->tc_cipher_pkey));
 
-	memcpy(tc->tc_pub_cipher_list, tc->tc_ciphers_pkey,
-	       tc->tc_ciphers_pkey_len);
-	tc->tc_pub_cipher_list_len = tc->tc_ciphers_pkey_len;
+	if (app_support)
+		eno->toe_opts[sizeof(tc->tc_cipher_pkey)] = app_support << 1;
+
+	/* don't set on retransmit.  XXX check if same */
+	if (tc->tc_state != STATE_PKCONF_SENT)
+		set_eno_transcript(tc, tcp);
 
 	tc->tc_state = STATE_PKCONF_SENT;
 
 	return DIVERT_MODIFY;
+}
+
+static int seqmap_find_start(struct tc_seq *s, uint32_t seq)
+{
+	return s->sm_start == seq;
+}
+
+static int seqmap_find_end(struct tc_seq *s, uint32_t seq)
+{
+	return s->sm_end == seq;
+}
+
+/* kernel -> internet */
+static int seqmap_find_ack_out(struct tc_seq *s, uint32_t ack)
+{
+	return (s->sm_end - s->sm_off) == ack;
+}
+
+/* internet -> kernel */
+static int seqmap_find_ack_in(struct tc_seq *s, uint32_t ack)
+{
+	return (s->sm_end + s->sm_off) == ack;
+}
+
+static struct tc_seq *seqmap_find(struct tc_seqmap *sm, uint32_t seq, sm_cb cb)
+{
+	int i = sm->sm_idx;
+
+	do {
+		struct tc_seq *s = &sm->sm_seq[i];
+
+		if (s->sm_start == 0 && s->sm_end == 0 && s->sm_off == 0)
+			return NULL;
+
+		if (cb(s, seq))
+			return s;
+
+		if (i == 0)
+			i = MAX_SEQMAP - 1;
+		else
+			i--;
+	} while (i != sm->sm_idx);
+
+	return NULL;
+}
+
+static uint32_t get_seq_off(struct tc *tc, uint32_t seq,
+			    struct tc_seqmap *seqmap, sm_cb cb)
+{
+	struct tc_seq *s = seqmap_find(seqmap, seq, cb);
+
+	if (!s)
+		return 0; /* XXX */
+
+	return s->sm_off;
+}
+
+static void add_seq(struct tc *tc, struct ip *ip, struct tcphdr *tcp, int len,
+		    struct tc_seqmap *seqmap)
+{
+	uint32_t dlen = tcp_data_len(ip, tcp);
+	uint32_t seq  = ntohl(tcp->th_seq);
+	uint32_t off  = len;
+	struct tc_seq *s, *rtr;
+
+	/* find cumulative offset until now, based on last packet */
+	s = seqmap_find(seqmap, seq, seqmap_find_end);
+	if (!s) {
+		/* can't find last packet... but it's ok if we just started */
+		s = &seqmap->sm_seq[seqmap->sm_idx];
+
+		if (seqmap->sm_idx != 0 
+		    || s->sm_start != 0 || s->sm_end != 0 || s->sm_off != 0) {
+			xprintf(XP_ALWAYS, "Damn - can't find seq %u\n", seq);
+			return;
+		}
+	}
+
+	/* Check if it's a retransmit.
+	 * XXX be more efficient
+	 */
+	rtr = seqmap_find(seqmap, seq, seqmap_find_start);
+	if (rtr) {
+		if (rtr->sm_end != (seq + dlen)) {
+			xprintf(XP_ALWAYS, "Damn - retransmitted diff size\n");
+			return;
+		}
+
+		/* retransmit */
+		return;
+	}
+
+	off += s->sm_off;
+
+	/* add an entry for this packet */
+	seqmap->sm_idx = (seqmap->sm_idx + 1) % MAX_SEQMAP;
+	s = &seqmap->sm_seq[seqmap->sm_idx];
+
+	s->sm_start = seq;
+	s->sm_end   = seq + dlen;
+	s->sm_off   = off;
+}
+
+/* 
+ * 1.  Record an entry for how much padding we're adding for this packet.
+ * 2.  Fix up the sequence number for this packet.
+ */
+static void fixup_seq_add(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
+			  int len, int in)
+{
+	uint32_t ack, seq;
+
+	if (_conf.cf_rdr)
+		return;
+
+	if (in) {
+		if (len)
+			add_seq(tc, ip, tcp, len, &tc->tc_rseqm);
+
+		ack  = ntohl(tcp->th_ack) - tc->tc_seq_off;
+		ack -= get_seq_off(tc, ack, &tc->tc_seqm, seqmap_find_ack_in);
+
+		tcp->th_ack = htonl(ack);
+
+		seq  = ntohl(tcp->th_seq);
+		seq -= get_seq_off(tc, seq, &tc->tc_rseqm, seqmap_find_end);
+		seq -= tc->tc_rseq_off;
+
+		tcp->th_seq = htonl(seq);
+	} else {
+		if (len)
+			add_seq(tc, ip, tcp, len, &tc->tc_seqm);
+
+		seq  = ntohl(tcp->th_seq);
+		seq += get_seq_off(tc, seq, &tc->tc_seqm, seqmap_find_end);
+		seq += tc->tc_seq_off;
+
+		tcp->th_seq = htonl(seq);
+
+		ack  = ntohl(tcp->th_ack) + tc->tc_rseq_off;
+		ack += get_seq_off(tc, ack, &tc->tc_rseqm, seqmap_find_ack_out);
+
+		tcp->th_ack = htonl(ack);
+	}
+
+	return;
 }
 
 static void *data_alloc(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
@@ -1118,6 +1271,13 @@ static void *data_alloc(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 	int totlen = ntohs(ip->ip_len);
 	int hl     = (ip->ip_hl << 2) + (tcp->th_off << 2);
 	void *p;
+
+	if (_conf.cf_rdr) {
+		assert(len < sizeof(tc->tc_rdr_buf));
+		tc->tc_rdr_len = len;
+
+		return tc->tc_rdr_buf;
+	}
 
 	assert(totlen == hl);
 	p = (char*) tcp + (tcp->th_off << 2);
@@ -1153,48 +1313,61 @@ static void generate_nonce(struct tc *tc, int len)
 	profile_add(1, "generated nonce out");
 }
 
+static int add_eno(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+{
+	struct tcpopt_eno *eno;
+	int len = sizeof(*eno);
+
+	eno = tcp_opts_alloc(tc, ip, tcp, len);
+	if (!eno) {
+		xprintf(XP_ALWAYS, "No space for ENO\n");
+		tc->tc_state = STATE_DISABLED;
+		return -1;
+	}
+	eno->toe_kind = TCPOPT_ENO;
+	eno->toe_len  = len;
+
+	return 0;
+}
+
 static int do_output_pkconf_rcvd(struct tc *tc, struct ip *ip,
 				 struct tcphdr *tcp, int retx)
 {
-	struct tc_subopt *tcs;
-	int len, klen;
+	int len;
+	uint16_t klen;
 	struct tc_init1 *init1;
 	void *key;
 	uint8_t *p;
 
+	/* Add the minimal ENO option to indicate support */
+	if (add_eno(tc, ip, tcp) == -1)
+		return DIVERT_ACCEPT;
+
 	if (!retx)
 		generate_nonce(tc, tc->tc_crypt_pub->cp_n_c);
 
-	tcs = subopt_alloc(tc, ip, tcp, 1);
-	assert(tcs);
-	tcs->tcs_op = TCOP_INIT1;
-
 	klen = crypt_get_key(tc->tc_crypt_pub->cp_pub, &key);
 	len  = sizeof(*init1) 
-	       + tc->tc_ciphers_sym_len 
+	       + tc->tc_ciphers_sym_len
 	       + tc->tc_nonce_len
 	       + klen;
 
 	init1 = data_alloc(tc, ip, tcp, len, retx);
 
-	init1->i1_magic       = htonl(TC_INIT1);
-	init1->i1_len	      = htonl(len);
-	init1->i1_pub	      = tc->tc_cipher_pkey;
-	init1->i1_num_ciphers = htons(tc->tc_ciphers_sym_len /
-				      sizeof(*tc->tc_ciphers_sym));
+	init1->i1_magic    = htonl(TC_INIT1);
+	init1->i1_len      = htonl(len);
+	init1->i1_nciphers = tc->tc_ciphers_sym_len;
 
-	p = (uint8_t*) init1->i1_ciphers;
+	p = init1->i1_data;
+
 	memcpy(p, tc->tc_ciphers_sym, tc->tc_ciphers_sym_len);
 	p += tc->tc_ciphers_sym_len;
-
-	memcpy(tc->tc_sym_cipher_list, tc->tc_ciphers_sym,
-	       tc->tc_ciphers_sym_len);
-	tc->tc_sym_cipher_list_len = tc->tc_ciphers_sym_len;
 
 	memcpy(p, tc->tc_nonce, tc->tc_nonce_len);
 	p += tc->tc_nonce_len;
 
 	memcpy(p, key, klen);
+	p += klen;
 
 	tc->tc_state = STATE_INIT1_SENT;
 	tc->tc_role  = ROLE_CLIENT;
@@ -1203,6 +1376,8 @@ static int do_output_pkconf_rcvd(struct tc *tc, struct ip *ip,
 
 	memcpy(tc->tc_init1, init1, len);
 	tc->tc_init1_len = len;
+
+	tc->tc_isn = ntohl(tcp->th_seq) + len;
 
 	return DIVERT_MODIFY;
 }
@@ -1213,16 +1388,30 @@ static int do_output_init1_rcvd(struct tc *tc, struct ip *ip,
 	return DIVERT_ACCEPT;
 }
 
+static int is_init(struct ip *ip, struct tcphdr *tcp, int init)
+{
+	struct tc_init1 *i1 = tcp_data(tcp);
+	int dlen = tcp_data_len(ip, tcp);
+
+	if (dlen < sizeof(*i1))
+		return 0;
+
+	if (ntohl(i1->i1_magic) != init)
+		return 0;
+
+	return 1;
+}
+
 static int do_output_init2_sent(struct tc *tc, struct ip *ip,
 				struct tcphdr *tcp)
 {
 	/* we generated this packet */
-	struct tc_subopt *opt = find_subopt(tcp, TCOP_INIT2);
+	int is_init2 = is_init(ip, tcp, TC_INIT2);
 
 	/* kernel is getting pissed off and is resending SYN ack (because we're
 	 * delaying his connect setup)
 	 */
-	if (!opt) {
+	if (!is_init2) {
 		/* we could piggy back / retx init2 */
 
 		assert(tcp_data_len(ip, tcp) == 0);
@@ -1230,8 +1419,9 @@ static int do_output_init2_sent(struct tc *tc, struct ip *ip,
 		assert(tc->tc_retransmit);
 
 		/* XXX */
-		tcp = (struct tcphdr*) &tc->tc_retransmit->r_packet[20];
-		assert(find_subopt(tcp, TCOP_INIT2));
+		ip  = (struct ip*) tc->tc_retransmit->r_packet;
+		tcp = (struct tcphdr*) (ip + 1);
+		assert(is_init(ip, tcp, TC_INIT2));
 
 		return DIVERT_DROP;
 	} else {
@@ -1249,181 +1439,19 @@ static int do_output_init2_sent(struct tc *tc, struct ip *ip,
 	return DIVERT_ACCEPT;
 }
 
-static void compute_mac_opts(struct tc *tc, struct tcphdr *tcp,
-			     struct iovec *iov, int *nump)
-{
-	int optlen, ol, optlen2;
-	uint8_t *p = (uint8_t*) (tcp + 1);
-	int num = *nump;
-
-	optlen2 = optlen = (tcp->th_off << 2) - sizeof(*tcp);
-	assert(optlen >= 0);
-
-	if (optlen == tc->tc_mac_opt_cache[tc->tc_dir_packet])
-		return;
-
-	iov[num].iov_base = NULL;
-
-	while (optlen > 0) {
-		ol = 0;
-
-		switch (*p) {
-		case TCPOPT_EOL:
-		case TCPOPT_NOP:
-			ol = 1;
-			ol = 1;
-			break;
-
-		default:
-			if (optlen < 2) {
-				xprintf(XP_ALWAYS, "death\n");
-				abort();
-			}
-
-			ol = *(p + 1);
-			if (ol > optlen) {
-				xprintf(XP_ALWAYS, "fuck off\n");
-				abort();
-			}
-		}
-
-		switch (*p) {
-		case TCPOPT_TIMESTAMP:
-		case TCPOPT_SKEETER:
-		case TCPOPT_BUBBA:
-		case TCPOPT_MD5:
-		case TCPOPT_MAC:
-		case TCPOPT_EOL:
-		case TCPOPT_NOP:
-			if (iov[num].iov_base) {
-				num++;
-				iov[num].iov_base = NULL;
-			}
-			break;
-
-		default:
-			if (!iov[num].iov_base) {
-				iov[num].iov_base = p;
-				iov[num].iov_len  = 0;
-			}
-			iov[num].iov_len += ol;
-			break;
-		}
-
-		optlen -= ol;
-		p += ol;
-	}
-
-	if (iov[num].iov_base)
-		num++;
-
-	if (*nump == num)
-		tc->tc_mac_opt_cache[tc->tc_dir_packet] = optlen2;
-
-	*nump = num;
-}
-
-static void compute_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
-			void *iv, void *out, int dir_in)
-{
-	struct mac_m m;
-	struct iovec iov[32];
-	int num = 0;
-	struct mac_a a;
-	uint8_t *outp;
-	int maca_len = tc->tc_mac_size;
-	uint8_t *mac = alloca(maca_len);
-	int maclen;
-	uint32_t *p1, *p2;
-	uint64_t seq = tc->tc_seq + ntohl(tcp->th_seq);
-	uint64_t ack = tc->tc_ack + ntohl(tcp->th_ack);
-	struct crypt_sym *cs = dir_in ? tc->tc_key_active->tc_alg_rx
-				      : tc->tc_key_active->tc_alg_tx;
-
-	seq -= dir_in ? tc->tc_isn_peer : tc->tc_isn;
-	ack -= dir_in ? tc->tc_isn : tc->tc_isn_peer;
-
-	assert(mac);
-	p2 = (uint32_t*) mac;
-
-	/* M struct */
-	m.mm_magic = htons(MACM_MAGIC);
-	m.mm_len   = htons(ntohs(ip->ip_len) - (ip->ip_hl << 2));
-	m.mm_off   = tcp->th_off;
-	m.mm_flags = tcp->th_flags;
-	m.mm_urg   = tcp->th_urp;
-	m.mm_seqhi = htonl(seq >> 32);
-	m.mm_seq   = htonl(seq & 0xFFFFFFFF);
-
-	iov[num].iov_base   = &m;
-	iov[num++].iov_len  = sizeof(m);
-
-	/* options */
-	compute_mac_opts(tc, tcp, iov, &num);
-	assert(num < sizeof(iov) / sizeof(*iov));
-
-	/* IV */
-	if (tc->tc_mac_ivlen) {
-		if (!iv) {
-			assert(!"implement");
-//			crypto_next_iv(tc, out, &tc->tc_mac_ivlen);
-			iv = out;
-			out = (void*) ((unsigned long) out + tc->tc_mac_ivlen);
-		}
-
-		iov[num].iov_base  = iv;
-		iov[num++].iov_len = tc->tc_mac_ivlen;
-	} else
-		assert(!iv);
-
-	/* payload */
-	assert(num < sizeof(iov) / sizeof(*iov));
-	iov[num].iov_len = tcp_data_len(ip, tcp);
-	if (iov[num].iov_len)
-		iov[num++].iov_base = tcp_data(tcp);
-
-	maclen = tc->tc_mac_size;
-
-	profile_add(2, "compute_mac pre M");
-	crypt_mac(cs->cs_mac, iov, num, out, &maclen);
-	profile_add(2, "compute_mac MACed M");
-
-	/* A struct */
-	a.ma_ackhi = htonl(ack >> 32);
-	a.ma_ack   = htonl(ack & 0xFFFFFFFF);
-
-	memset(mac, 0, maca_len);
-
-	iov[0].iov_base = &a;
-	iov[0].iov_len  = sizeof(a);
-
-	crypt_mac(cs->cs_ack_mac, iov, 1, mac, &maca_len);
-	assert(maca_len == tc->tc_mac_size);
-	profile_add(2, "compute_mac MACed A");
-
-	/* XOR the two */
-	p1     = (uint32_t*) out;
-	maclen = tc->tc_mac_size;
-
-	while (maclen >= 4) {
-		*p1++  ^= *p2++;
-		maclen -= 4;
-	}
-
-	if (maclen == 0)
-		return;
-
-	outp = (uint8_t*) p1;
-	mac  = (uint8_t*) p2;
-
-	while (maclen--) 
-		*outp++ ^= *mac++;
-}
-
-static void *get_iv(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+static void *get_iv(struct tc *tc, struct ip *ip, struct tcphdr *tcp, int enc)
 {
 	static uint64_t seq;
+	uint64_t isn = enc ? tc->tc_isn : tc->tc_isn_peer;
 	void *iv = NULL;
+
+	/* XXX byte order */
+
+	if (_conf.cf_rdr) {
+		seq = enc ? tc->tc_rdr_tx : tc->tc_rdr_rx;
+
+		return &seq;
+	}
 
 	switch (tc->tc_sym_ivmode) {
 	case IVMODE_CRYPT:
@@ -1431,9 +1459,8 @@ static void *get_iv(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 		break;
 
 	case IVMODE_SEQ:
-		seq   = htonl(tc->tc_seq >> 32);
-		seq <<= 32;
-		seq  |= tcp->th_seq;
+		/* XXX WRAP */
+		seq = htonl(tcp->th_seq) - isn;
 		iv = &seq;
 		break;
 
@@ -1448,51 +1475,84 @@ static void *get_iv(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	return iv;
 }
 
-static void encrypt(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+static int add_data(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
+		    int head, int tail)
+{
+	int thlen   = tcp->th_off * 4;
+	int datalen = tcp_data_len(ip, tcp);
+	int totlen = (ip->ip_hl * 4) + thlen + head + datalen + tail;
+	uint8_t *data = tcp_data(tcp);
+
+	/* extend packet
+         * We assume we clamped the MSS
+         */
+	if (totlen >= 1500) {
+		xprintf(XP_DEBUG, "Damn... sending large packet %d\n", totlen);
+		return -1;
+	}
+
+	set_ip_len(ip, totlen);
+
+	/* move data forward */
+	memmove(data + head, data, datalen);
+
+	return 0;
+}
+
+static int encrypt_and_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
 	uint8_t *data = tcp_data(tcp);
 	int dlen = tcp_data_len(ip, tcp);
 	void *iv = NULL;
 	struct crypt *c = tc->tc_key_active->tc_alg_tx->cs_cipher;
+	int head;
+	struct tc_record *record;
+	int maclen = tc->tc_mac_size + tc->tc_mac_ivlen;
+	struct tc_flags *flags;
+	uint8_t *mac;
 
-	iv = get_iv(tc, ip, tcp);
-
-	if (dlen)
-		crypt_encrypt(c, iv, data, dlen);
-}
-
-static int add_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
-{
-	struct tcpopt_mac *tom;
-	int len = sizeof(*tom) + tc->tc_mac_size + tc->tc_mac_ivlen;
-
-	/* add MAC option */
-	tom = tcp_opts_alloc(tc, ip, tcp, len);
-	if (!tom)
-		return -1;
-
-	tom->tom_kind = TCPOPT_MAC;
-	tom->tom_len  = len;
-
-	compute_mac(tc, ip, tcp, NULL, tom->tom_data, 0);
-
-	return 0;
-}
-
-static int fixup_seq(struct tc *tc, struct tcphdr *tcp, int in)
-{
-	if (!tc->tc_seq_off)
+	if (!dlen) {
+		fixup_seq_add(tc, ip, tcp, 0, 0);
 		return 0;
-
-	if (in) {
-		tcp->th_ack = htonl(ntohl(tcp->th_ack) - tc->tc_seq_off);
-		tcp->th_seq = htonl(ntohl(tcp->th_seq) - tc->tc_rseq_off);
-	} else {
-		tcp->th_seq = htonl(ntohl(tcp->th_seq) + tc->tc_seq_off);
-		tcp->th_ack = htonl(ntohl(tcp->th_ack) + tc->tc_rseq_off);
 	}
 
-	return 1;
+	/* TLV + flags */
+	head = sizeof(*record) + 1;
+
+	if (tcp->th_flags & TH_URG)
+		head += 2;
+
+	/* XXX should check if add_data fails first */
+	fixup_seq_add(tc, ip, tcp, head + maclen, 0);
+
+	if (add_data(tc, ip, tcp, head, maclen))
+		return -1;
+
+	iv = get_iv(tc, ip, tcp, 1);
+
+	/* Prepare TLV */
+	record = tcp_data(tcp);
+	record->tr_control = 0;
+	record->tr_len     = htons(tcp_data_len(ip, tcp) - sizeof(*record));
+
+	/* Prepare flags */
+	flags = (struct tc_flags *) record->tr_data;
+	flags->tf_flags = 0;
+	flags->tf_flags |= tcp->th_flags & TH_FIN ? TCF_FIN : 0;
+	flags->tf_flags |= tcp->th_flags & TH_URG ? TCF_URG : 0;
+
+	if (flags->tf_flags & TCF_URG)
+		flags->tf_urp[0] = tcp->th_urp;
+
+	mac = data + tcp_data_len(ip, tcp) - maclen;
+
+	c->c_aead_encrypt(c, iv, record, sizeof(*record),
+			  data + sizeof(*record), dlen + head - sizeof(*record),
+			  mac);
+
+	profile_add(1, "do_output post sym encrypt and mac");
+
+	return 0;
 }
 
 static int connected(struct tc *tc)
@@ -1500,41 +1560,6 @@ static int connected(struct tc *tc)
 	return tc->tc_state == STATE_ENCRYPTING 
 	       || tc->tc_state == STATE_REKEY_SENT
 	       || tc->tc_state == STATE_REKEY_RCVD;
-}
-
-static int do_compress(struct tc *tc, int tcpop, int subop, int len, void *data)
-{
-	uint8_t *p = data;
-
-	len += 2;
-	p   -= 2;
-
-	memcpy(&tc->tc_opt[tc->tc_optlen], p, len);
-
-	tc->tc_optlen += len;
-	assert(tc->tc_optlen <= sizeof(tc->tc_opt));
-
-	return 0;
-}
-
-static void compress_options(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
-{
-	int len;
-	int max = 60;
-	void *p;
-
-	memset(tc->tc_opt, TCPOPT_EOL, sizeof(tc->tc_opt));
-	tc->tc_optlen = 0;
-	foreach_opt(tc, tcp, do_compress);
-
-	len = max - (tcp->th_off << 2);
-	assert(len >= 0);
-	if (len) {
-		p = tcp_opts_alloc(tc, ip, tcp, len);
-		assert(p);
-	}
-
-	memcpy(tcp + 1, tc->tc_opt, sizeof(tc->tc_opt));
 }
 
 static void do_rekey(struct tc *tc)
@@ -1581,67 +1606,6 @@ static int rekey_complete(struct tc *tc)
 	return 1;
 }
 
-static void rekey_output(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
-{
-	int rk = 0;
-	struct tco_rekeystream *tr;
-
-	/* got all old packets from the other dude, lets rekey our side */
-	if (tc->tc_state == STATE_REKEY_RCVD
-	    && ntohl(tcp->th_ack) >= tc->tc_rekey_seq) {
-	    	xprintf(XP_DEBUG, "RX rekey done %d %p\n", tc->tc_keygen, tc);
-		tc->tc_keygenrx++;
-		assert(tc->tc_keygenrx == tc->tc_keygen);
-		if (rekey_complete(tc))
-			return;
-
-		tc->tc_state	  = STATE_REKEY_SENT;
-		tc->tc_rekey_seq  = ntohl(tcp->th_seq);
-		tc->tc_sent_bytes = 0;
-	}
-
-	/* half way through rekey - figure out current key */
-	if (tc->tc_keygentx != tc->tc_keygenrx
-	    && tc->tc_keygentx == tc->tc_keygen)
-		tc->tc_key_active = &tc->tc_key_next;
-
-	/* XXX check if proto supports rekey */
-
-	if (!rk)
-		return;
-
-	/* initiate rekey */
-	if (tc->tc_sent_bytes > rk && tc->tc_state != STATE_REKEY_RCVD) {
-		do_rekey(tc);
-
-		tc->tc_sent_bytes = 0;
-		tc->tc_rekey_seq  = ntohl(tcp->th_seq);
-		tc->tc_state      = STATE_REKEY_SENT;
-	}
-
-	if (tc->tc_state != STATE_REKEY_SENT)
-		return;
-
-	/* old shit - send with old key */
-	if (ntohl(tcp->th_seq) < tc->tc_rekey_seq) {
-		assert(ntohl(tcp->th_seq) + tcp_data_len(ip, tcp)
-		       <= tc->tc_rekey_seq);
-
-		return;
-	}
-
-	/* send rekeys */
-	compress_options(tc, ip, tcp);
-
-	tr = (struct tco_rekeystream*) subopt_alloc(tc, ip, tcp, sizeof(*tr));
-	assert(tr);
-
-	tr->tr_op  	  = TCOP_REKEY;
-	tr->tr_key	  = tc->tc_keygen;
-	tr->tr_seq	  = htonl(tc->tc_rekey_seq);
-	tc->tc_key_active = &tc->tc_key_next;
-}
-
 static int do_output_encrypting(struct tc *tc, struct ip *ip,
 				struct tcphdr *tcp)
 {
@@ -1652,27 +1616,27 @@ static int do_output_encrypting(struct tc *tc, struct ip *ip,
 		return DIVERT_DROP;
 	}
 
+	/* We're retransmitting INIT2 */
+	if (tc->tc_retransmit) {
+		/* XXX */
+		ip  = (struct ip*) tc->tc_retransmit->r_packet;
+		tcp = (struct tcphdr*) (ip + 1);
+		assert(is_init(ip, tcp, TC_INIT2));
+
+		return DIVERT_ACCEPT;
+	}
+
 	assert(!(tcp->th_flags & TH_SYN));
 
-	fixup_seq(tc, tcp, 0);
-
 	tc->tc_key_active = &tc->tc_key_current;
-	rekey_output(tc, ip, tcp);
 
 	profile_add(1, "do_output pre sym encrypt");
-	encrypt(tc, ip, tcp);
-	profile_add(1, "do_output post sym encrypt");
-
-	if (add_mac(tc, ip, tcp)) { 
+	if (encrypt_and_mac(tc, ip, tcp)) {
 		/* hopefully pmtu disc works */
 		xprintf(XP_ALWAYS, "No space for MAC - dropping\n");
 
 		return DIVERT_DROP;
 	}
-	profile_add(1, "post add mac");
-
-	/* XXX retransmissions.  approx. */
-	tc->tc_sent_bytes += tcp_data_len(ip, tcp);
 
 	return DIVERT_MODIFY;
 }
@@ -1698,7 +1662,7 @@ static int do_tcp_output(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	int rc = DIVERT_ACCEPT;
 
 	if (tcp->th_flags & TH_SYN)
-		tc->tc_isn = ntohl(tcp->th_seq);
+		tc->tc_isn = ntohl(tcp->th_seq) + 1;
 
 	if (tcp->th_flags == TH_SYN) {
 		if (tc->tc_tcp_state == TCPSTATE_LASTACK) {
@@ -1750,20 +1714,30 @@ static int do_tcp_output(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 static int do_output_nextk1_rcvd(struct tc *tc, struct ip *ip,
 				 struct tcphdr *tcp)
 {
-	struct tc_subopt *tcs;
+	struct tcpopt_eno *eno;
+	int len;
 
 	if (!tc->tc_sess)
 		return do_output_hello_rcvd(tc, ip, tcp);
 
-	tcs = subopt_alloc(tc, ip, tcp, 1);
-	if (!tcs) {
+	len = sizeof(*eno) + 1;
+
+	if (tc->tc_app_support)
+		len += 1;
+
+	eno = tcp_opts_alloc(tc, ip, tcp, len);
+	if (!eno) {
 		xprintf(XP_ALWAYS, "No space for NEXTK2\n");
 		tc->tc_state = STATE_DISABLED;
 		return DIVERT_ACCEPT;
 	}
 
-	tcs->tcs_op = (tc->tc_app_support & 1) ? TCOP_NEXTK2_SUPPORT
-					       : TCOP_NEXTK2;
+	eno->toe_kind    = TCPOPT_ENO;
+	eno->toe_len     = len;
+	eno->toe_opts[0] = TC_RESUME;
+
+	if (tc->tc_app_support)
+		eno->toe_opts[1] = tc->tc_app_support << 1;
 
 	tc->tc_state = STATE_NEXTK2_SENT;
 
@@ -1814,7 +1788,7 @@ static int do_output(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 		break;
 
 	case STATE_INIT1_SENT:
-		if (!find_subopt(tcp, TCOP_INIT1))
+		if (!is_init(ip, tcp, TC_INIT1))
 			rc = do_output_pkconf_rcvd(tc, ip, tcp, 1);
 		break;
 
@@ -1872,32 +1846,133 @@ static int do_clamp_mss(struct tc *tc, uint16_t *mss)
 	return DIVERT_MODIFY;
 }
 
-static int opt_input_closed(struct tc *tc, int tcpop, int subop, int len,
-			    void *data)
+static int negotiate_cipher(struct tc *tc, struct tc_cipher_spec *a, int an)
+{
+	struct tc_cipher_spec *b = tc->tc_ciphers_pkey;
+	int bn = tc->tc_ciphers_pkey_len / sizeof(*tc->tc_ciphers_pkey);
+	struct tc_cipher_spec *out = &tc->tc_cipher_pkey;
+
+	tc->tc_pub_cipher_list_len = an * sizeof(*a);
+	memcpy(tc->tc_pub_cipher_list, a, tc->tc_pub_cipher_list_len);
+
+	while (an--) {
+		while (bn--) {
+			if (a->tcs_algo == b->tcs_algo) {
+				out->tcs_algo = a->tcs_algo;
+				return 1;
+			}
+
+			b++;
+		}
+
+		a++;
+	}
+
+	return 0;
+}
+
+static void init_pkey(struct tc *tc)
+{
+	struct ciphers *c = _ciphers_pkey.c_next;
+	struct tc_cipher_spec *s;
+
+	assert(tc->tc_cipher_pkey.tcs_algo);
+
+	while (c) {
+		s = (struct tc_cipher_spec*) c->c_spec;
+
+		if (s->tcs_algo == tc->tc_cipher_pkey.tcs_algo) {
+			tc->tc_crypt_pub = crypt_new(c->c_cipher->c_ctr);
+			return;
+		}
+
+		c = c->c_next;
+	}
+
+	assert(!"Can't init cipher");
+}
+
+static void check_app_support(struct tc *tc, uint8_t *data, int len)
+{
+	while (len--) {
+		/* general option */
+		if ((*data >> 4) == 0) {
+			/* application aware bit */
+			if (*data & 2)
+				tc->tc_app_support |= 2;
+		}
+
+		data++;
+	}
+}
+
+static int can_session_resume(struct tc *tc, uint8_t *data, int len)
+{
+	int i;
+	struct tc_sess_opt *sopt;
+
+	for (i = 0; i < len; i++) {
+		if (data[i] & TC_OPT_VLEN) {
+			if ((data[i] & ~TC_OPT_VLEN) != TC_RESUME)
+				return 0;
+
+			break;
+		}
+	}
+
+	if (i == len)
+		return 0;
+
+	sopt = (struct tc_sess_opt*) &data[i];
+	assert(sopt->ts_opt == (TC_RESUME | TC_OPT_VLEN));
+
+	if (sizeof(*sopt) != (len - i)) {
+		xprintf(XP_ALWAYS, "Bad NEXTK1\n");
+		return 0;
+	}
+
+	tc->tc_sess = session_find(tc, &sopt->ts_sid);
+	profile_add(2, "found session");
+
+	if (!tc->tc_sess)
+		return 0;
+
+	tc->tc_state = STATE_NEXTK1_RCVD;
+
+	return 1;
+}
+
+static void input_closed_eno(struct tc *tc, uint8_t *data, int len)
+{
+	struct tc_cipher_spec *cipher = (struct tc_cipher_spec*) data;
+
+	check_app_support(tc, data, len);
+
+	if (can_session_resume(tc, data, len))
+		return;
+
+	if (!negotiate_cipher(tc, cipher, len)) {
+		xprintf(XP_ALWAYS, "No cipher\n");
+		tc->tc_state = STATE_DISABLED;
+		return;
+	}
+
+	init_pkey(tc);
+
+	tc->tc_state = STATE_HELLO_RCVD;
+}
+
+static int opt_input_closed(struct tc *tc, int tcpop, int len, void *data)
 {
 	uint8_t *p;
 
 	profile_add(2, "opt_input_closed in");
 
-	switch (subop) {
-	case TCOP_HELLO_SUPPORT:
-		tc->tc_app_support |= 2;
-		/* fallthrough */
-	case TCOP_HELLO:
-		tc->tc_state = STATE_HELLO_RCVD;
-		break;
-
-	case TCOP_NEXTK1_SUPPORT:
-		tc->tc_app_support |= 2;
-		/* fallthrough */
-	case TCOP_NEXTK1:
-		tc->tc_state = STATE_NEXTK1_RCVD;
-		tc->tc_sess  = session_find(tc, data);
-		profile_add(2, "found session");
-		break;
-	}
-
 	switch (tcpop) {
+	case TCPOPT_ENO:
+		input_closed_eno(tc, data, len);
+		break;
+
 	case TCPOPT_SACK_PERMITTED:
 		p     = data;
 		p[-2] = TCPOPT_NOP;
@@ -1932,32 +2007,10 @@ static int do_input_closed(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	foreach_opt(tc, tcp, opt_input_closed);
 	profile_add(1, "do_input_closed options parsed");
 
+	tc->tc_eno_len = 0;
+	set_eno_transcript(tc, tcp);
+
 	return tc->tc_verdict;
-}
-
-static int negotiate_cipher(struct tc *tc, struct tc_cipher_spec *a, int an)
-{
-	struct tc_cipher_spec *b = tc->tc_ciphers_pkey;
-	int bn = tc->tc_ciphers_pkey_len / sizeof(*tc->tc_ciphers_pkey);
-	struct tc_cipher_spec *out = &tc->tc_cipher_pkey;
-
-	tc->tc_pub_cipher_list_len = an * sizeof(*a);
-	memcpy(tc->tc_pub_cipher_list, a, tc->tc_pub_cipher_list_len);
-
-	while (an--) {
-		while (bn--) {
-			if (a->tcs_algo == b->tcs_algo) {
-				out->tcs_algo    = a->tcs_algo;
-				return 1;
-			}
-
-			b++;
-		}
-
-		a++;
-	}
-
-	return 0;
 }
 
 static void make_reply(void *buf, struct ip *ip, struct tcphdr *tcp)
@@ -1996,6 +2049,9 @@ static void *alloc_retransmit(struct tc *tc)
 	struct retransmit *r;
 	int len;
 
+	if (_conf.cf_rdr)
+		return &tc->tc_rdr_buf[512]; /* XXX */
+
 	assert(!tc->tc_retransmit);
 
 	len = sizeof(*r) + tc->tc_mtu;
@@ -2009,89 +2065,39 @@ static void *alloc_retransmit(struct tc *tc)
 	return r->r_packet;
 }
 
-static void init_pkey(struct tc *tc)
-{
-	struct ciphers *c = _ciphers_pkey.c_next;
-	struct tc_cipher_spec *s;
-
-	assert(tc->tc_cipher_pkey.tcs_algo);
-
-	while (c) {
-		s = (struct tc_cipher_spec*) c->c_spec;
-
-		if (s->tcs_algo == tc->tc_cipher_pkey.tcs_algo) {
-			tc->tc_crypt_pub = crypt_new(c->c_cipher->c_ctr);
-			return;
-		}
-
-		c = c->c_next;
-	}
-
-	assert(!"Can't init cipher");
-}
-
 static int do_input_hello_sent(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
-	struct tc_subopt *tcs;
 	struct tc_cipher_spec *cipher;
+	struct tcpopt_eno *eno;
+	int len;
 
-	tcs = find_subopt(tcp, TCOP_HELLO);
-	if (tcs) {
-		if (tc->tc_cmode == CMODE_ALWAYS) {
-			tc->tc_state = STATE_DISABLED;
-
-			return DIVERT_ACCEPT;
-		}
-
-		tc->tc_state = STATE_HELLO_RCVD;
+	if (!(eno = find_opt(tcp, TCPOPT_ENO))) {
+		tc->tc_state = STATE_DISABLED;
 
 		return DIVERT_ACCEPT;
 	}
 
-	if ((tcs = find_subopt(tcp, TCOP_PKCONF_SUPPORT)))
-		tc->tc_app_support |= 2;
-	else {
-		tcs = find_subopt(tcp, TCOP_PKCONF);
-		if (!tcs) {
-			tc->tc_state = STATE_DISABLED;
+	len = eno->toe_len - 2;
+	assert(len >= 0);
 
-			return DIVERT_ACCEPT;
-		}
-	}
+	check_app_support(tc, eno->toe_opts, len);
 
-	assert((tcs->tcs_len - 2) % sizeof(*cipher) == 0);
-	cipher = (struct tc_cipher_spec*) tcs->tcs_data;
+	cipher = (struct tc_cipher_spec*) eno->toe_opts;
 
-	if (!negotiate_cipher(tc, cipher,
-			      (tcs->tcs_len - 2) / sizeof(*cipher))) {
+	/* XXX truncate len as it could go to the variable options (like SID) */
+
+	if (!negotiate_cipher(tc, cipher, len)) {
 		xprintf(XP_ALWAYS, "No cipher\n");
 		tc->tc_state = STATE_DISABLED;
 
 		return DIVERT_ACCEPT;
 	}
 
+	set_eno_transcript(tc, tcp);
+
 	init_pkey(tc);
 
 	tc->tc_state = STATE_PKCONF_RCVD;
-
-	/* we switched roles, we gotta inject the INIT1 */
-	if (tcp->th_flags != (TH_SYN | TH_ACK)) {
-		void *buf;
-		struct ip *ip2;
-		struct tcphdr *tcp2;
-
-		buf = alloc_retransmit(tc);
-		make_reply(buf, ip, tcp);
-
-		ip2 = (struct ip*) buf;
-		tcp2 = (struct tcphdr*) (ip2 + 1);
-		do_output_pkconf_rcvd(tc, ip2, tcp2, 0);
-
-		checksum_packet(tc, ip2, tcp2);
-		divert_inject(ip2, ntohs(ip2->ip_len));
-
-		tc->tc_state = STATE_INIT1_SENT;
-	}
 
 	return DIVERT_ACCEPT;
 }
@@ -2174,29 +2180,21 @@ static int select_pkey(struct tc *tc, struct tc_cipher_spec *pkey)
 
 static void compute_ss(struct tc *tc)
 {
-	struct iovec iov[5];
-	unsigned char num;
+	struct iovec iov[4];
 
 	profile_add(1, "compute ss in");
 
-	assert((tc->tc_pub_cipher_list_len % 3) == 0);
+	iov[0].iov_base = tc->tc_eno;
+	iov[0].iov_len  = tc->tc_eno_len;
 
-	num = tc->tc_pub_cipher_list_len / 3;
+	iov[1].iov_base = tc->tc_init1;
+	iov[1].iov_len  = tc->tc_init1_len;
 
-	iov[0].iov_base = &num;
-	iov[0].iov_len  = 1;
+	iov[2].iov_base = tc->tc_init2;
+	iov[2].iov_len  = tc->tc_init2_len;
 
-	iov[1].iov_base = tc->tc_pub_cipher_list;
-	iov[1].iov_len  = tc->tc_pub_cipher_list_len;
-
-	iov[2].iov_base = tc->tc_init1;
-	iov[2].iov_len  = tc->tc_init1_len;
-
-	iov[3].iov_base = tc->tc_init2;
-	iov[3].iov_len  = tc->tc_init2_len;
-
-	iov[4].iov_base = tc->tc_pms;
-	iov[4].iov_len  = tc->tc_pms_len;
+	iov[3].iov_base = tc->tc_pms;
+	iov[3].iov_len  = tc->tc_pms_len;
 
 	crypt_set_key(tc->tc_crypt_pub->cp_hkdf,
 		      tc->tc_nonce, tc->tc_nonce_len);
@@ -2217,65 +2215,47 @@ static void compute_ss(struct tc *tc)
 static int process_init1(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 			 uint8_t *kxs, int kxs_len)
 {
-	struct tc_subopt *tcs;
 	struct tc_init1 *i1;
 	int dlen;
 	uint8_t *nonce;
 	int nonce_len;
-	int num_ciphers;
 	void *key;
 	int klen;
 	int cl;
 	void *pms;
 	int pmsl;
+	int len;
+	uint8_t *p;
 
-	tcs = find_subopt(tcp, TCOP_INIT1);
-	if (!tcs)
+	if (!is_init(ip, tcp, TC_INIT1))
 		return bad_packet("can't find init1");
 
 	dlen = tcp_data_len(ip, tcp);
 	i1   = tcp_data(tcp);
 
-	if (dlen < sizeof(*i1))
-		return bad_packet("short init1");
-
-	if (ntohl(i1->i1_magic) != TC_INIT1)
-		return bad_packet("bad magic");
-
-	if (dlen != ntohl(i1->i1_len))
-		return bad_packet("bad init1 lenn");
-
-	if (!select_pkey(tc, &i1->i1_pub))
+	if (!select_pkey(tc, &tc->tc_cipher_pkey))
 		return bad_packet("init1: bad public key");
 
-	nonce_len   = tc->tc_crypt_pub->cp_n_c;
-	num_ciphers = ntohs(i1->i1_num_ciphers);
+	klen 	  = crypt_get_key(tc->tc_crypt_pub->cp_pub, &key);
+	nonce_len = tc->tc_crypt_pub->cp_n_c;
+	len 	  = sizeof(*i1) + i1->i1_nciphers + nonce_len + klen;
 
-	klen = dlen 
-	       - sizeof(*i1)
-	       - num_ciphers * sizeof(*i1->i1_ciphers)
-	       - nonce_len;
-
-	if (klen <= 0)
+	/* strict len for now */
+	if (len != dlen || len != ntohl(i1->i1_len))
 	    	return bad_packet("bad init1 len");
 
-	if (tc->tc_crypt_pub->cp_max_key && klen > tc->tc_crypt_pub->cp_max_key)
-		return bad_packet("init1: key length disagreement");
-
-	if (tc->tc_crypt_pub->cp_min_key && klen < tc->tc_crypt_pub->cp_min_key)
-		return bad_packet("init2: key length too short");
-
-	if (!negotiate_sym_cipher(tc, i1->i1_ciphers, num_ciphers))
+	p = i1->i1_data;
+	if (!negotiate_sym_cipher(tc, (struct tc_scipher *) p, i1->i1_nciphers))
 		return bad_packet("init1: can't negotiate");
 
-	nonce = (uint8_t*) &i1->i1_ciphers[num_ciphers];
+	nonce = p + i1->i1_nciphers;
 	key   = nonce + nonce_len;
 
 	profile_add(1, "pre pkey set key");
 
 	/* figure out key len */
 	if (crypt_set_key(tc->tc_crypt_pub->cp_pub, key, klen) == -1)
-		return 0;
+		return bad_packet("init1: bad pubkey");
 
 	profile_add(1, "pkey set key");
 
@@ -2313,6 +2293,8 @@ static int process_init1(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 
 	tc->tc_state = STATE_INIT1_RCVD;
 
+	tc->tc_isn_peer = ntohl(tcp->th_seq) + dlen;
+
 	return 1;
 }
 
@@ -2330,7 +2312,6 @@ static int swallow_data(struct ip *ip, struct tcphdr *tcp)
 static int do_input_pkconf_sent(struct tc *tc, struct ip *ip,
 				struct tcphdr *tcp)
 {
-	struct tc_subopt *tcs;
 	int len, dlen;
 	void *buf;
 	struct ip *ip2;
@@ -2338,12 +2319,27 @@ static int do_input_pkconf_sent(struct tc *tc, struct ip *ip,
 	struct tc_init2 *i2;
 	uint8_t kxs[1024];
 	int cipherlen;
+	struct tcpopt_eno *eno;
+	int rdr = _conf.cf_rdr;
+
+	/* Check to see if the other side added ENO per
+	   Section 3.2 of draft-ietf-tcpinc-tcpeno-00. */
+	if (!rdr && !(eno = find_opt(tcp, TCPOPT_ENO))) {
+		xprintf(XP_DEBUG, "No ENO option found in expected INIT1\n");
+		tc->tc_state = STATE_DISABLED;
+
+		return DIVERT_ACCEPT;
+	}
 
 	/* syn retransmission */
 	if (tcp->th_flags == TH_SYN)
 		return do_input_closed(tc, ip, tcp);
 
 	if (!process_init1(tc, ip, tcp, kxs, sizeof(kxs))) {
+		/* XXX. Per Section 3.2 of draft-ietf-tcpinc-tcpeno-00,
+		   you are supposed to tear down the connection.
+		   This is a bug.
+		*/
 		tc->tc_state = STATE_DISABLED;
 
 		return DIVERT_ACCEPT;
@@ -2357,16 +2353,12 @@ static int do_input_pkconf_sent(struct tc *tc, struct ip *ip,
 	ip2 = (struct ip*) buf;
 	tcp2 = (struct tcphdr*) (ip2 + 1);
 
-	tcs = subopt_alloc(tc, ip2, tcp2, 1);
-	assert(tcs);
-	tcs->tcs_op = TCOP_INIT2;
-
 	len = sizeof(*i2) + cipherlen;
 	i2  = data_alloc(tc, ip2, tcp2, len, 0);
 
-	i2->i2_magic   = htonl(TC_INIT2);
-	i2->i2_len     = htonl(len);
-	i2->i2_scipher = tc->tc_cipher_sym;
+	i2->i2_magic  = htonl(TC_INIT2);
+	i2->i2_len    = htonl(len);
+	i2->i2_cipher = tc->tc_cipher_sym.sc_algo;
 
 	memcpy(i2->i2_data, kxs, cipherlen);
 
@@ -2378,8 +2370,11 @@ static int do_input_pkconf_sent(struct tc *tc, struct ip *ip,
 	memcpy(tc->tc_init2, i2, len);
 	tc->tc_init2_len = len;
 
+	tc->tc_isn = ntohl(tcp2->th_seq) + len;
+
 	checksum_packet(tc, ip2, tcp2);
-	divert_inject(ip2, ntohs(ip2->ip_len));
+
+	inject_ip(ip2);
 
 	tc->tc_state = STATE_INIT2_SENT;
 
@@ -2443,39 +2438,32 @@ static int select_sym(struct tc *tc, struct tc_scipher *s)
 
 static int process_init2(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
-	struct tc_subopt *tcs;
 	struct tc_init2 *i2;
 	int len;
 	int nlen;
 	void *nonce;
 
-	tcs = find_subopt(tcp, TCOP_INIT2);
-	if (!tcs)
+	if (!is_init(ip, tcp, TC_INIT2))
 		return bad_packet("init2: can't find opt");
 
 	i2  = tcp_data(tcp);
 	len = tcp_data_len(ip, tcp);
 
-	if (len < sizeof(*i2))
-		return bad_packet("init2: short packet");
+	nlen = tc->tc_crypt_pub->cp_cipher_len;
 
-	if (len != ntohl(i2->i2_len))
-		return bad_packet("init2: bad lenn");
-
-	nlen = len - sizeof(*i2);
-	if (nlen <= 0)
+	if (sizeof(*i2) + nlen > len || ntohl(i2->i2_len) > len)
 		return bad_packet("init2: bad len");
 
-	if (ntohl(i2->i2_magic) != TC_INIT2)
-		return bad_packet("init2: bad magic");
-
-	if (!select_sym(tc, &i2->i2_scipher))
+	if (!select_sym(tc, (struct tc_scipher*) (&i2->i2_cipher)))
 		return bad_packet("init2: select_sym()");
 
 	if (len > sizeof(tc->tc_init2))
 		return bad_packet("init2: too long");
+
 	memcpy(tc->tc_init2, i2, len);
 	tc->tc_init2_len = len;
+
+	tc->tc_isn_peer = ntohl(tcp->th_seq) + len;
 
 	nonce = i2->i2_data;
 	nlen  = crypt_decrypt(tc->tc_crypt_pub->cp_pub, NULL, nonce, nlen);
@@ -2495,6 +2483,9 @@ static void ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	struct ip *ip2;
 	struct tcphdr *tcp2;
 
+	if (_conf.cf_rdr)
+		return;
+
 	ip2  = (struct ip*) buf;
 	tcp2 = (struct tcphdr*) (ip2 + 1);
 
@@ -2505,15 +2496,19 @@ static void ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	tcp2->th_ack = htonl(ntohl(tcp2->th_ack) - tc->tc_rseq_off);
 
 	checksum_packet(tc, ip2, tcp2);
-	divert_inject(ip2, ntohs(ip2->ip_len));
+	do_inject_ip(ip2);
 }
 
 static int do_input_init1_sent(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
-	int dlen;
+	int dlen = tcp_data_len(ip, tcp);
 
 	/* XXX syn ack re-TX - check pkconf */
 	if (tcp->th_flags == (TH_SYN | TH_ACK))
+		return DIVERT_ACCEPT;
+
+	/* pure ack after connect */
+	if (dlen == 0)
 		return DIVERT_ACCEPT;
 
 	if (!process_init2(tc, ip, tcp)) {
@@ -2535,45 +2530,6 @@ static int do_input_init1_sent(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	return DIVERT_MODIFY;
 }
 
-static int check_mac(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
-{
-	struct tcpopt_mac *tom;
-	void *mac = alloca(tc->tc_mac_size);
-
-	assert(mac);
-
-	tom = find_opt(tcp, TCPOPT_MAC);
-	if (!tom) {
-		if (!tc->tc_mac_rst && (tcp->th_flags & TH_RST))
-			return 0;
-
-		return -1;
-	}
-
-	compute_mac(tc, ip, tcp, tc->tc_mac_ivlen ? tom->tom_data : NULL,
-		    mac, 1);
-
-	if (memcmp(&tom->tom_data[tc->tc_mac_ivlen], mac, tc->tc_mac_size) != 0)
-		return -2;
-
-	return 0;
-}
-
-static int decrypt(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
-{
-	uint8_t *data = tcp_data(tcp);
-	int dlen = tcp_data_len(ip, tcp);
-	void *iv = NULL;
-	struct crypt *c = tc->tc_key_active->tc_alg_rx->cs_cipher;
-
-	iv = get_iv(tc, ip, tcp);
-
-	if (dlen)
-		crypt_decrypt(c, iv, data, dlen);
-
-	return dlen;
-}
-
 static struct tco_rekeystream *rekey_input(struct tc *tc, struct ip *ip,
 					   struct tcphdr *tcp)
 {
@@ -2584,9 +2540,8 @@ static struct tco_rekeystream *rekey_input(struct tc *tc, struct ip *ip,
 	    && tc->tc_keygenrx == tc->tc_keygen)
 		tc->tc_key_active = &tc->tc_key_next;
 
-	tr = (struct tco_rekeystream *) find_subopt(tcp, TCOP_REKEY);
-	if (!tr)
-		return NULL;
+	/* XXX TODO */
+	return NULL;
 
 	if (tr->tr_key == (uint8_t) ((tc->tc_keygen + 1))) {
 		do_rekey(tc);
@@ -2642,37 +2597,51 @@ static void rekey_input_post(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 	}
 }
 
-static int do_input_encrypting(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+static int check_mac_and_decrypt(struct tc *tc, struct ip *ip,
+				 struct tcphdr *tcp)
 {
 	int rc;
-	int v = DIVERT_ACCEPT;
-	struct tco_rekeystream *tr;
+	struct tc_flags *flags;
+	struct tc_record *record = tcp_data(tcp);
+	int len = tcp_data_len(ip, tcp);
+	int maclen = tc->tc_mac_size + tc->tc_mac_ivlen;
+	uint8_t *clear;
+	struct crypt *c = tc->tc_key_active->tc_alg_rx->cs_cipher;
+	uint8_t *data = (uint8_t*) (record + 1);
+	uint8_t *mac = ((uint8_t*) record) + len - maclen;
+	void *iv = get_iv(tc, ip, tcp, 0);
+	int dlen;
 
-	tc->tc_key_active = &tc->tc_key_current;
-	tr = rekey_input(tc, ip, tcp);
+	if (len == 0) {
+		fixup_seq_add(tc, ip, tcp, 0, 1);
+		return 0;
+	}
 
-	profile_add(1, "do_input pre check_mac");
-	if ((rc = check_mac(tc, ip, tcp))) {
-		/* XXX gross */
-		if (rc == -1) {
-			/* session caching */
-			if (tcp->th_flags == (TH_SYN | TH_ACK))
-				return DIVERT_ACCEPT;
+	/* basic length check */
+	if (len < (sizeof(*record) + maclen))
+		return -1;
 
-			/* pkey */
-			else if (find_subopt(tcp, TCOP_INIT2)) {
-				ack(tc, ip, tcp);
-				return DIVERT_DROP;
-			}
-		}
+	/* check MAC and decrypt */
+	profile_add(1, "do_input pre check_mac and decrypt");
 
-		xprintf(XP_ALWAYS, "MAC failed %d\n", rc);
+	rc = c->c_aead_decrypt(c, iv, record, sizeof(*record),
+			      data, len - sizeof(*record) - maclen,
+			      mac);
+
+	profile_add(1, "do_input post check_mac and decrypt");
+
+	if (rc == -1) {
+		xprintf(XP_ALWAYS, "MAC check failed\n");
 
 		if (_conf.cf_debug)
 			abort();
 
-		return DIVERT_DROP;
-	} else if (tc->tc_sess) {
+		return -1;
+	}
+
+	/* MAC passed */
+
+	if (tc->tc_sess) {
 		/* When we receive the first MACed packet, we know the other
 		 * side is setup so we can cache this session.
 		 */
@@ -2680,19 +2649,65 @@ static int do_input_encrypting(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 		tc->tc_sess	     = NULL;
 	}
 
-	profile_add(1, "do_input post check_mac");
+	/* check record */
+	dlen = len - sizeof(*record);
 
-	if (decrypt(tc, ip, tcp))
-		v = DIVERT_MODIFY;
+	if (dlen != ntohs(record->tr_len))
+		return -1;
 
-	profile_add(1, "do_input post decrypt");
+	if (record->tr_control != 0)
+		return -1;
+
+	if (dlen < maclen)
+		return -1;
+
+	dlen -= maclen;
+
+	assert(dlen > 0);
+
+	/* check flags */
+	dlen -= sizeof(*flags);
+
+	if (dlen < 0) {
+		xprintf(XP_ALWAYS, "Short packet\n");
+		return -1;
+	}
+
+	flags = (struct tc_flags*) (record + 1);
+	clear = (uint8_t*) (flags + 1);
+
+	if (flags->tf_flags & TCF_URG) {
+		dlen  -= 2;
+		clear += 2;
+
+		if (dlen < 0) {
+			xprintf(XP_ALWAYS, "Short packett\n");
+			return -1;
+		}
+	}
+
+	fixup_seq_add(tc, ip, tcp, len - dlen, 1);
+
+	/* remove record, flags, MAC */
+	memmove(record, clear, dlen);
+	set_ip_len(ip, (ip->ip_hl * 4) + (tcp->th_off * 4) + dlen);
+
+	return 0;
+}
+
+static int do_input_encrypting(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+{
+	struct tco_rekeystream *tr;
+
+	tc->tc_key_active = &tc->tc_key_current;
+	tr = rekey_input(tc, ip, tcp);
+
+	if (check_mac_and_decrypt(tc, ip, tcp))
+		return DIVERT_DROP;
 
 	rekey_input_post(tc, ip, tcp, tr);
 
-	if (fixup_seq(tc, tcp, 1))
-		v = DIVERT_MODIFY;
-
-	return v;
+	return DIVERT_MODIFY;
 }
 
 static int do_input_init2_sent(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
@@ -2700,7 +2715,7 @@ static int do_input_init2_sent(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	int rc;
 
 	if (tc->tc_retransmit) {
-		assert(find_subopt(tcp, TCOP_INIT1));
+		assert(is_init(ip, tcp, TC_INIT1));
 		return DIVERT_DROP;
 	}
 
@@ -2777,7 +2792,7 @@ static int tcp_input_pre(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	int rc = DIVERT_ACCEPT;
 
 	if (tcp->th_flags & TH_SYN)
-		tc->tc_isn_peer = ntohl(tcp->th_seq);
+		tc->tc_isn_peer = ntohl(tcp->th_seq) + 1;
 
 	if (tcp->th_flags == TH_SYN && tc->tc_tcp_state == TCPSTATE_LASTACK) {
 		tc_finish(tc);
@@ -2811,6 +2826,7 @@ static int tcp_input_post(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	case STATE_REKEY_SENT:
 	case STATE_REKEY_RCVD:
 	case STATE_DISABLED:
+	case STATE_INIT2_SENT:
 		break;
 
 	default:
@@ -2855,27 +2871,37 @@ static int tcp_input_post(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 static int do_input_nextk1_sent(struct tc *tc, struct ip *ip,
 				struct tcphdr *tcp)
 {
-	struct tc_subopt *sub;
+	struct tcpopt_eno *eno = find_opt(tcp, TCPOPT_ENO);
+	int len, i;
 
-	if (find_subopt(tcp, TCOP_NEXTK2_SUPPORT))
-		tc->tc_app_support |= 2;
-	else {
-		sub = find_subopt(tcp, TCOP_NEXTK2);
-		if (!sub) {
-			assert(tc->tc_sess->ts_used);
-			tc->tc_sess->ts_used = 0;
-			tc->tc_sess = NULL;
+	if (!eno) {
+		tc->tc_state = STATE_DISABLED;
 
-			if (!_conf.cf_nocache)
-				xprintf(XP_DEFAULT, "Session caching failed\n");
+		return DIVERT_ACCEPT;
+	}
 
-			return do_input_hello_sent(tc, ip, tcp);
+	len = eno->toe_len - 2;
+
+	assert(len >= 0);
+	check_app_support(tc, eno->toe_opts, len);
+
+	/* see if we can resume the session */
+	for (i = 0; i < len; i++) {
+		if (eno->toe_opts[i] == TC_RESUME) {
+			enable_encryption(tc);
+			return DIVERT_ACCEPT;
 		}
 	}
 
-	enable_encryption(tc);
+	/* nope */
+	assert(tc->tc_sess->ts_used);
+	tc->tc_sess->ts_used = 0;
+	tc->tc_sess = NULL;
 
-	return DIVERT_ACCEPT;
+	if (!_conf.cf_nocache)
+		xprintf(XP_DEFAULT, "Session caching failed\n");
+
+	return do_input_hello_sent(tc, ip, tcp);
 }
 
 static int do_input_nextk2_sent(struct tc *tc, struct ip *ip,
@@ -2976,6 +3002,518 @@ static int do_input(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	return rc;
 }
 
+static void fake_ip_tcp(struct ip *ip, struct tcphdr *tcp, int len)
+{
+	int hl = sizeof(*ip) + sizeof(*tcp);
+
+	memset(ip, 0, hl);
+
+	ip->ip_hl     = sizeof(*ip) / 4;
+	ip->ip_len    = htons(len + hl);
+
+	tcp->th_flags = 0;
+	tcp->th_off   = sizeof(*tcp) / 4;
+}
+
+static void proxy_connection(struct tc *tc)
+{
+        unsigned char buf[4096];
+	struct ip *ip = (struct ip *) buf;
+	struct tcphdr *tcp = (struct tcphdr*) (ip + 1);
+	unsigned char *p = (unsigned char*) (tcp + 1);
+        int rc;
+	struct tc *peer = tc->tc_rdr_peer;
+	struct tc *enc = NULL;
+	int out = tc->tc_rdr_state == STATE_RDR_LOCAL;
+
+        if ((rc = read(tc->tc_rdr_fd->fd_fd, p, sizeof(buf) - 256)) <= 0) {
+                kill_rdr(tc);
+                return;
+        }
+
+	if (tc->tc_state == STATE_ENCRYPTING)
+		enc = tc;
+	else if (peer->tc_state == STATE_ENCRYPTING)
+		enc = peer;
+
+	/* XXX fix variables / state */
+	if (peer->tc_rdr_inbound || tc->tc_rdr_inbound)
+		out = !out;
+
+	/* XXX */
+	fake_ip_tcp(ip, tcp, rc);
+
+	if (enc) {
+		if (out) {
+			rc = do_output_encrypting(enc, ip, tcp);
+			rc = tcp_data_len(ip, tcp);
+			enc->tc_rdr_tx += rc;
+		} else {
+			if (do_input_encrypting(enc, ip, tcp) == DIVERT_DROP)
+				return;
+
+			enc->tc_rdr_rx += rc;
+			rc = tcp_data_len(ip, tcp);
+		}
+	}
+
+        /* XXX assuming non-blocking write */
+        if (write(peer->tc_rdr_fd->fd_fd, p, rc) != rc) {
+                kill_rdr(tc);
+                return;
+        }
+}
+
+static void rdr_handshake_complete(struct tc *tc)
+{
+	int tos = 0;
+
+	if (!tc->tc_rdr_fd)
+		return;
+
+	/* stop intercepting handshake - all ENO opts have been set */
+	if (setsockopt(tc->tc_rdr_fd->fd_fd, IPPROTO_IP, IP_TOS, &tos,
+		       sizeof(tos)) == -1) {
+	    perror("setsockopt(IP_TOS)");
+	    kill_rdr(tc);
+	    return;
+	}
+}
+
+static void rdr_process_init(struct tc *tc)
+{
+	int headroom = 40;
+	unsigned char buf[2048];
+	int len;
+	struct ip *ip = (struct ip *) buf;
+	struct tcphdr *tcp = (struct tcphdr*) (ip + 1);
+	int rc;
+	struct fd *fd = tc->tc_rdr_fd;
+	struct tc_init1 *i1 = (struct tc_init1*) &buf[headroom];
+	int rem = sizeof(buf) - headroom;
+	fd_set fds;
+	struct timeval tv;
+
+	/* make sure we read only init1 and not past it.
+	 * First, figure out how big init is.  Then read that.
+	 */
+	if ((len = read(fd->fd_fd, i1, sizeof(*i1))) != sizeof(*i1))
+		goto __kill_rdr;
+
+	rem -= sizeof(*i1);
+
+	/* Read init */
+	len = ntohl(i1->i1_len);
+
+	if (len > rem || len < sizeof(*i1) || len < 0)
+		goto __kill_rdr;
+
+	rem = len - sizeof(*i1);
+
+	FD_ZERO(&fds);
+	FD_SET(fd->fd_fd, &fds);
+
+	tv.tv_sec = tv.tv_usec = 0;
+
+	if (select(fd->fd_fd + 1, &fds, NULL, NULL, &tv) == -1)
+		err(1, "select(2)");
+
+	if (!FD_ISSET(fd->fd_fd, &fds))
+		goto __kill_rdr;
+
+	if (read(fd->fd_fd, i1 + 1, rem) != rem)
+		goto __kill_rdr;
+
+	/* XXX */
+	fake_ip_tcp(ip, tcp, len);
+
+	switch (tc->tc_state) {
+	/* outbound connections */
+	case STATE_INIT1_SENT:
+		rc = do_input_init1_sent(tc, ip, tcp);
+
+		rdr_handshake_complete(tc);
+		break;
+
+	/* inbound connections */
+	case STATE_PKCONF_SENT:
+		/* XXX sniff ENO */
+		if (is_init(ip, tcp, TC_INIT1)) {
+			add_eno(tc, ip, tcp);
+		} else {
+			tc->tc_state = STATE_DISABLED;
+			return;
+		}
+
+		do_input_pkconf_sent(tc, ip, tcp);
+		if (tc->tc_state != STATE_INIT2_SENT)
+			goto __kill_rdr;
+
+		if (write(fd->fd_fd, tc->tc_rdr_buf, tc->tc_rdr_len)
+			  != tc->tc_rdr_len)
+			goto __kill_rdr;
+
+		enable_encryption(tc);
+		break;
+	}
+
+	return;
+__kill_rdr:
+	xprintf(XP_ALWAYS, "Error reading INIT %p\n", tc);
+	kill_rdr(tc);
+	return;
+}
+
+static void rdr_local_handler(struct fd *fd)
+{
+	struct tc *tc = fd->fd_priv;
+	struct tc *peer = tc->tc_rdr_peer;
+
+	if (tc->tc_state == STATE_NEXTK2_SENT)
+		enable_encryption(tc);
+
+	if (peer->tc_state == STATE_NEXTK2_SENT)
+		enable_encryption(peer);
+
+	switch (tc->tc_state) {
+	case STATE_INIT1_SENT:
+	case STATE_PKCONF_SENT:
+		rdr_process_init(tc);
+		return;
+	}
+
+	if (tc->tc_state == STATE_ENCRYPTING
+	    || peer->tc_state == STATE_ENCRYPTING
+	    || tc->tc_state == STATE_RDR_PLAIN
+	    || peer->tc_state == STATE_RDR_PLAIN) {
+		proxy_connection(tc);
+		return;
+	}
+
+	/* XXX we should really fix this - shouldn't get here randomly.
+	 * We should: 1. check if socket is dead / alive
+	 * 2. not put this thing in select until we're ready.
+	 * 3. def not spin the CPU
+	 */
+#if 0
+	xprintf(XP_ALWAYS, "unhandled RDR %d:%d\n",
+		tc->tc_state, peer->tc_state);
+	kill_rdr(tc);
+#endif
+}
+
+static void rdr_remote_handler(struct fd *fd)
+{
+	struct tc *tc = fd->fd_priv;
+
+	if (!tc->tc_rdr_connected) {
+		rdr_check_connect(tc);
+		return;
+	}
+
+	rdr_local_handler(fd);
+}
+
+static void rdr_new_connection(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
+			       int flags)
+{
+        struct sockaddr_in from, to;
+        int s, rc;
+        struct fd *sock;
+        socklen_t len;
+        int tos = IPTOS_RELIABILITY;
+	struct tc *peer;
+	int in = flags & DF_IN;
+
+        /* figure out where connection is going to */
+        memset(&to, 0, sizeof(to));
+        memset(&from, 0, sizeof(from));
+
+        from.sin_family = to.sin_family = PF_INET;
+
+        from.sin_port        = tcp->th_sport;
+        from.sin_addr.s_addr = ip->ip_src.s_addr;
+
+        to.sin_port          = tcp->th_dport;
+        to.sin_addr.s_addr   = ip->ip_dst.s_addr;
+
+	if (_divert->orig_dest && _divert->orig_dest(&to, ip, &flags) == -1) {
+		/* XXX this is retarded - we rely on the SYN retransmit to kick
+		 * things off again
+		 */
+		tc->tc_rdr_drop_sa = 1;
+		xprintf(XP_ALWAYS, "Can't find RDR\n");
+		return;
+	}
+
+	in = flags & DF_IN;
+
+	xprintf(XP_NOISY, "RDR orig dest %s:%d\n",
+		inet_ntoa(to.sin_addr), ntohs(to.sin_port));
+
+        /* connect to destination */
+        if ((s = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1)
+                err(1, "socket()");
+
+	set_nonblocking(s);
+
+	/* signal handshake to firewall */
+        if (setsockopt(s, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)) == -1)
+            err(1, "setsockopt()");
+
+	/* XXX bypass firewall */
+        if (in) {
+		memcpy(&tc->tc_rdr_addr, &to, sizeof(tc->tc_rdr_addr));
+                to.sin_addr.s_addr = inet_addr("127.0.0.1");
+	}
+
+        if ((rc = connect(s, (struct sockaddr*) &to, sizeof(to))) == -1) {
+#ifdef __WIN32__
+		if (WSAGetLastError() != WSAEWOULDBLOCK) {
+#else
+		if (errno != EINPROGRESS) {
+#endif
+			close(s);
+			tc->tc_state = STATE_DISABLED;
+			return;
+		}
+	}
+
+	/* XXX */
+	if (in && !tc->tc_rdr_drop_sa) {
+		to.sin_port = htons(REDIRECT_PORT);
+	} else {
+		len = sizeof(from);
+
+		if (getsockname(s, (struct sockaddr*) &from, &len) == -1)
+			err(1, "getsockname()");
+	}
+
+        /* create peer */
+	peer = do_new_connection(from.sin_addr.s_addr, from.sin_port,
+				 to.sin_addr.s_addr, to.sin_port, in);
+
+        xprintf(XP_NOISY, "Adding a connection %s:%d",
+	        inet_ntoa(from.sin_addr),
+		ntohs(from.sin_port));
+
+        xprintf(XP_NOISY, "->%s:%d [%p]%s\n",
+                inet_ntoa(to.sin_addr),
+		ntohs(to.sin_port), peer,
+		in ? " inbound" : "");
+
+        sock = add_fd(s, rdr_remote_handler);
+	sock->fd_priv  = peer;
+	sock->fd_state = FDS_WRITE;
+
+	peer->tc_rdr_fd      = sock;
+	peer->tc_rdr_state   = STATE_RDR_REMOTE;
+	peer->tc_rdr_peer    = tc;
+	peer->tc_rdr_inbound = in;
+
+	memcpy(&peer->tc_rdr_addr, &to, sizeof(peer->tc_rdr_addr));
+
+        /* save SYN to replay once connection is successful */
+        len = ntohs(ip->ip_len);
+        assert(len < sizeof(peer->tc_rdr_buf));
+
+        memcpy(peer->tc_rdr_buf, ip, len);
+        peer->tc_rdr_len = len;
+
+	if (!in) {
+		ip  = (struct ip *) peer->tc_rdr_buf;
+		tcp = get_tcp(ip);
+
+		ip->ip_dst.s_addr = to.sin_addr.s_addr;
+		tcp->th_dport     = to.sin_port;
+		checksum_packet(tc, ip, tcp);
+	}
+
+	tc->tc_rdr_peer  = peer;
+	tc->tc_rdr_state = STATE_RDR_LOCAL;
+
+	return;
+}
+
+static int handle_syn_ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+{
+	switch (tc->tc_state) {
+	case STATE_HELLO_RCVD:
+		return do_output_hello_rcvd(tc, ip, tcp);
+
+	case STATE_NEXTK2_SENT:
+		/* syn ack rtx */
+	case STATE_NEXTK1_RCVD:
+		return do_output_nextk1_rcvd(tc, ip, tcp);
+
+	case STATE_CLOSED:
+	case STATE_RDR_PLAIN:
+		break;
+
+	default:
+		return DIVERT_DROP;
+	}
+
+	return DIVERT_ACCEPT;
+}
+
+static int rdr_syn_ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+{
+	struct tc *peer = tc->tc_rdr_peer;
+
+	/* Linux: we let the SYN through but not the SYN ACK.  We need to let
+	 * the SYN through so we can get orig dest.
+	 */
+	if (tc->tc_rdr_state == STATE_RDR_NONE) {
+		tc->tc_rdr_drop_sa = 1;
+
+		return DIVERT_DROP;
+	}
+
+	if (tc->tc_rdr_drop_sa)
+		return handle_syn_ack(tc, ip, tcp);
+
+	if (tc->tc_rdr_inbound) {
+		int rc;
+
+		assert(peer);
+
+		rc = handle_syn_ack(peer, ip, tcp);
+
+		if (rc == DIVERT_DROP)
+			return DIVERT_DROP;
+
+		/* we're still redirecting manually */
+		ip->ip_src.s_addr = peer->tc_rdr_addr.sin_addr.s_addr;
+		tcp->th_sport     = peer->tc_rdr_addr.sin_port;
+		checksum_packet(tc, ip, tcp);
+
+		return DIVERT_MODIFY;
+	}
+
+	switch (tc->tc_state) {
+	case STATE_HELLO_SENT:
+		do_input_hello_sent(tc, ip, tcp);
+		break;
+
+	case STATE_NEXTK1_SENT:
+		do_input_nextk1_sent(tc, ip, tcp);
+
+		/* XXX wait to send an ACK */
+		if (tc->tc_state == STATE_ENCRYPTING)
+			rdr_handshake_complete(tc);
+		break;
+	}
+
+	if (tc->tc_state == STATE_DISABLED) {
+		tc->tc_state = STATE_RDR_PLAIN;
+		rdr_handshake_complete(tc);
+	}
+
+	return DIVERT_ACCEPT;
+}
+
+static int rdr_ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+{
+	int rc;
+
+	/* send init1 */
+	if (tc->tc_state == STATE_PKCONF_RCVD) {
+		rc = do_output_pkconf_rcvd(tc, ip, tcp, 0);
+
+		if (write(tc->tc_rdr_fd->fd_fd, tc->tc_rdr_buf, tc->tc_rdr_len)
+		    != tc->tc_rdr_len) {
+			kill_rdr(tc);
+			return DIVERT_DROP;
+		}
+
+		/* drop packet - let's add ENO to it */
+		return DIVERT_DROP;
+	}
+
+	/* add eno to init1 */
+	if (tc->tc_state == STATE_INIT1_SENT) {
+		if (is_init(ip, tcp, TC_INIT1))
+			return do_output_pkconf_rcvd(tc, ip, tcp, 1);
+	}
+
+	return DIVERT_DROP;
+}
+
+static int rdr_syn(struct tc *tc, struct ip *ip, struct tcphdr *tcp, int flags)
+{
+	int in = flags & DIR_IN;
+
+	/* new connection */
+	if (tc->tc_rdr_state == STATE_RDR_NONE)
+		rdr_new_connection(tc, ip, tcp, flags);
+
+	if (tc->tc_rdr_state == STATE_RDR_NONE)
+		return DIVERT_ACCEPT;
+
+	/* incoming */
+	if (in) {
+		/* drop the locally generated SYN */
+		if (tc->tc_rdr_state == STATE_RDR_LOCAL
+		    && !tc->tc_rdr_drop_sa
+		    && !tc->tc_rdr_peer->tc_rdr_inbound) {
+			return DIVERT_DROP;
+		}
+
+		switch (tc->tc_state) {
+		case STATE_NEXTK1_RCVD:
+			/* XXX check same SID */
+		case STATE_HELLO_RCVD:
+		case STATE_CLOSED:
+			do_input_closed(tc, ip, tcp);
+
+			if (tc->tc_state == STATE_DISABLED)
+				tc->tc_state = STATE_RDR_PLAIN;
+
+			/* XXX clamp MSS */
+			return DIVERT_ACCEPT;
+		}
+
+		return DIVERT_DROP;
+	}
+
+	/* outbound */
+
+	/* Add ENO to SYN */
+	if (tc->tc_rdr_state == STATE_RDR_REMOTE) {
+		switch (tc->tc_state) {
+		case STATE_HELLO_SENT:
+		case STATE_NEXTK1_SENT:
+		case STATE_CLOSED:
+			return do_output_closed(tc, ip, tcp);
+		}
+	}
+
+	/* drop original non-ENO syn */
+
+	return DIVERT_DROP;
+}
+
+static int rdr_packet(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
+		      int flags)
+{
+        /* our own connections */
+        if (ip->ip_dst.s_addr == inet_addr("127.0.0.1")
+            && ip->ip_dst.s_addr == ip->ip_src.s_addr)
+                return DIVERT_ACCEPT;
+
+	if (tcp->th_flags == TH_SYN)
+		return rdr_syn(tc, ip, tcp, flags);
+
+	if (tcp->th_flags == (TH_SYN | TH_ACK))
+		return rdr_syn_ack(tc, ip, tcp);
+
+	if (tcp->th_flags & TH_ACK)
+		return rdr_ack(tc, ip, tcp);
+
+	return DIVERT_DROP;
+}
+
 int tcpcrypt_packet(void *packet, int len, int flags)
 {
 	struct ip *ip = packet;
@@ -3021,10 +3559,14 @@ int tcpcrypt_packet(void *packet, int len, int flags)
 	tc->tc_dir_packet = (flags & DF_IN) ? DIR_IN : DIR_OUT;
 	tc->tc_csum       = 0;
 
-	if (flags & DF_IN)
-		rc = do_input(tc, ip, tcp);
-	else
-		rc = do_output(tc, ip, tcp);
+	if (_conf.cf_rdr) {
+		rc = rdr_packet(tc, ip, tcp, flags);
+	} else {
+		if (flags & DF_IN)
+			rc = do_input(tc, ip, tcp);
+		else
+			rc = do_output(tc, ip, tcp);
+	}
 
 	/* XXX for performance measuring - ensure sane results */
 	assert(!_conf.cf_debug || (tc->tc_state != STATE_DISABLED));
@@ -3253,6 +3795,24 @@ static int do_tcpcrypt_netstat(struct conn *c, void *val, unsigned int *len)
 		n->tn_dport	 = c->c_addr[1].sin_port;
 		n->tn_len	 = htons(tc->tc_sid.s_len);
 
+		if (_conf.cf_rdr) {
+			struct tc *peer = tc->tc_rdr_peer;
+
+			switch (peer->tc_rdr_state) {
+			case STATE_RDR_LOCAL:
+				n->tn_sip.s_addr = peer->tc_rdr_addr.sin_addr
+								.s_addr;
+				n->tn_sport = peer->tc_rdr_addr.sin_port;
+				break;
+
+			case STATE_RDR_REMOTE:
+				if (ntohs(n->tn_sport) == REDIRECT_PORT)
+					n->tn_sport = peer->tc_rdr_addr
+								.sin_port;
+				break;
+			}
+		}
+
 		memcpy(n->tn_sid, tc->tc_sid.s_data, tc->tc_sid.s_len);
 		n = (struct tc_netstat*) ((unsigned long) n + tl);
 		copied += tl;
@@ -3358,18 +3918,18 @@ static void init_cipher(struct ciphers *c)
 {
 	struct crypt_pub *cp;
 	struct crypt_sym *cs;
-	unsigned int spec = htonl(c->c_cipher->c_id);
+	uint8_t spec = c->c_cipher->c_id;
 
 	switch (c->c_cipher->c_type) {
 	case TYPE_PKEY:
-		c->c_speclen = 3;
+		c->c_speclen = 1;
 
 		cp = c->c_cipher->c_ctr();
 		crypt_pub_destroy(cp);
 		break;
-	
+
 	case TYPE_SYM:
-		c->c_speclen = 4;
+		c->c_speclen = 1;
 
 		cs = crypt_new(c->c_cipher->c_ctr);
 		crypt_sym_destroy(cs);
@@ -3438,6 +3998,9 @@ static void init_random(void)
 	FILE *f;
 	size_t nread;
 
+#ifdef __WIN32__
+	seed = time(NULL);
+#else
 	path = _conf.cf_random_path;
 	if (path) {
 		if (!(f = fopen(path, "r"))) {
@@ -3461,7 +4024,7 @@ static void init_random(void)
 		}
 		xprintf(XP_ALWAYS, "\n");
 	}
-
+#endif
 	if (seed) {
 		srand(seed);
 		xprintf(XP_DEBUG, "Random seed set to %u\n", seed);
@@ -3470,8 +4033,127 @@ static void init_random(void)
 	}
 }
 
+static struct tc *lookup_connection_rdr(struct sockaddr_in *s_in)
+{
+	int i, j;
+	struct conn *c;
+
+	/* XXX data strcuture fail */
+	for (i = 0; i < sizeof(_connection_map) / sizeof(*_connection_map); i++)
+	{
+		c = _connection_map[i];
+		if (!c)
+			continue;
+
+		while ((c = c->c_next)) {
+			for (j = 0; j < 2; j++) {
+				struct sockaddr_in *s = &c->c_addr[j];
+
+				if (s->sin_addr.s_addr == s_in->sin_addr.s_addr
+				    && s->sin_port == s_in->sin_port) {
+					return c->c_tc;
+				}
+			}
+		}
+	}
+
+	return NULL;
+}
+
+static void redirect_listen_handler(struct fd *fd)
+{
+        struct sockaddr_in s_in;
+        socklen_t len = sizeof(s_in);
+	int dude;
+	struct tc *tc, *peer;
+
+        /* Accept redirected connection */
+        if ((dude = accept(fd->fd_fd, (struct sockaddr*) &s_in, &len)) == -1) {
+                xprintf(XP_ALWAYS, "accept() failed\n");
+                return;
+        }
+
+        /* try to find him */
+	tc = lookup_connection_rdr(&s_in);
+	if (!tc) {
+                xprintf(XP_ALWAYS, "Couldn't find dude %s:%d\n",
+			inet_ntoa(s_in.sin_addr), ntohs(s_in.sin_port));
+                close(dude);
+                return;
+        }
+
+	peer = tc->tc_rdr_peer;
+
+	if (tc->tc_rdr_inbound) {
+		struct tc *tmp = peer;
+
+		peer = tc;
+		tc   = tmp;
+	}
+
+	/* XXX */
+	if (!peer->tc_rdr_fd) {
+		close(dude);
+		kill_rdr(peer);
+		return;
+	}
+
+	assert(peer);
+	assert(peer->tc_rdr_peer == tc);
+	assert(peer->tc_rdr_fd);
+	assert(!tc->tc_rdr_fd);
+
+	fd = add_fd(dude, rdr_local_handler);
+	fd->fd_priv   = tc;
+	tc->tc_rdr_fd = fd;
+
+	memcpy(&tc->tc_rdr_addr, &s_in, sizeof(tc->tc_rdr_addr));
+
+        xprintf(XP_NOISY, "Redirect proxy accepted %s:%d",
+                inet_ntoa(tc->tc_rdr_addr.sin_addr),
+		ntohs(tc->tc_rdr_addr.sin_port));
+
+        xprintf(XP_NOISY, "->%s:%d\n",
+                inet_ntoa(peer->tc_rdr_addr.sin_addr),
+		ntohs(peer->tc_rdr_addr.sin_port));
+
+	/* wake up peer */
+	if (peer->tc_rdr_fd->fd_state == FDS_IDLE)
+		peer->tc_rdr_fd->fd_state = FDS_READ;
+}
+
+static void init_rdr(void)
+{
+        int s, one = 1;
+        struct sockaddr_in s_in;
+
+	if (!_conf.cf_rdr)
+		return;
+
+        if ((s = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1)
+                err(1, "socket()");
+
+        if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) == -1)
+                err(1, "setsockopt()");
+
+        memset(&s_in, 0, sizeof(s_in));
+
+        s_in.sin_family      = PF_INET;
+        s_in.sin_port        = htons(REDIRECT_PORT);
+        s_in.sin_addr.s_addr = INADDR_ANY;
+
+        if (bind(s, (struct sockaddr*) &s_in, sizeof(s_in)) == -1)
+                err(1, "bind()");
+
+        if (listen(s, 5) == -1)
+                err(1, "listen()");
+
+        add_fd(s, redirect_listen_handler);
+}
+
 void tcpcrypt_init(void)
 {
 	init_random();
 	init_ciphers();
+	init_rdr();
 }

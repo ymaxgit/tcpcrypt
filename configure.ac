@@ -1,7 +1,7 @@
 #                                               -*- Autoconf -*-
 
 AC_PREREQ([2.65])
-AC_INIT([tcpcrypt], [0.3], [tcpcrypt-users@lists.stanford.edu], [tcpcrypt], [http://tcpcrypt.org])
+AC_INIT([tcpcrypt], [0.4], [tcpcrypt-users@lists.stanford.edu], [tcpcrypt], [http://tcpcrypt.org])
 AC_CONFIG_SRCDIR([src/tcpcryptd.c])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_AUX_DIR(config)
@@ -109,8 +109,9 @@ AC_CHECK_LIB([cap], [cap_set_flag], [tcpcryptd_LDADD="-lcap $tcpcryptd_LDADD"])
 AC_CHECK_LIB([crypto], [EVP_OpenInit], [crypto_LDADD="-lcrypto"])
 
 AC_CHECK_LIB([netfilter_queue], [nfq_open], [tcpcryptd_LDADD="-lnetfilter_queue $tcpcryptd_LDADD"])
-
+AC_CHECK_LIB([netfilter_conntrack], [nfct_open], [tcpcryptd_LDADD="-lnetfilter_conntrack $tcpcryptd_LDADD"])
 AC_CHECK_LIB([nfnetlink], [nfnl_rcvbufsiz], [tcpcryptd_LDADD="-lnfnetlink $tcpcryptd_LDADD"])
+AC_CHECK_LIB([pcap], [pcap_open_live], [tcpcryptd_LDADD="-lpcap $tcpcryptd_LDADD"])
 AC_CHECK_LIB([pthread], [pthread_create])
 AC_CHECK_LIB([wsock32], [bind]) # TODO: find symbol name
 AC_CHECK_LIB([iphlpapi], [GetAdaptersInfo]) # TODO: find symbol name

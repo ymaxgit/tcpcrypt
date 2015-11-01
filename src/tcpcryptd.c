@@ -20,7 +20,9 @@
 #include "tcpcrypt_divert.h"
 #include "tcpcrypt.h"
 #include "tcpcryptd.h"
+#ifndef __WIN32__
 #include "priv.h"
+#endif
 #include "profile.h"
 #include "test.h"
 #include "crypto.h"
@@ -32,6 +34,7 @@
 #define MAX_TIMERS 1024
 
 struct conf _conf;
+struct divert *_divert;
 
 struct backlog_ctl {
 	struct backlog_ctl	*bc_next;
@@ -81,6 +84,8 @@ static struct state {
 	struct in_addr		s_nt_ip;
 } _state;
 
+static struct fd _fds;
+
 typedef void (*test_cb)(void);
 
 struct test {
@@ -111,7 +116,7 @@ static void ensure_socket_address_unlinked(struct socket_address *sa)
 
 static void cleanup()
 {
-	divert_close();
+	_divert->close();
 
 	if (_state.s_ctl > 0)
 		close(_state.s_ctl);
@@ -432,14 +437,14 @@ static void prepare_ctl(struct network_test *nt)
 }
 
 #ifdef __WIN32__
-static void set_nonblocking(int s)
+void set_nonblocking(int s)
 {
 	u_long mode = 1;
 
 	ioctlsocket(s, FIONBIO, &mode);
 }
 #else
-static void set_nonblocking(int s)
+void set_nonblocking(int s)
 {
 	int flags;
 
@@ -768,19 +773,46 @@ static int run_network_tests(void)
 
 static void do_cycle(void)
 {
-	fd_set fds;
-	int max;
+	fd_set rd, wr;
+	int max = 0;
 	struct timer *t;
 	struct timeval tv, *tvp = NULL;
 	int testing = 0;
+	struct fd *fd = &_fds;
 
 	testing = run_network_tests();
 
-	FD_ZERO(&fds);
-	FD_SET(_state.s_divert, &fds);
-	FD_SET(_state.s_ctl, &fds);
+	FD_ZERO(&rd);
+	FD_ZERO(&wr);
 
-	max = (_state.s_divert > _state.s_ctl) ? _state.s_divert : _state.s_ctl;
+        /* prepare select */
+        while (fd->fd_next) {
+                struct fd *next = fd->fd_next;
+
+                /* unlink dead sockets */
+                if (next->fd_state == FDS_DEAD) {
+			fd->fd_next = next->fd_next;
+                        free(next);
+                        continue;
+                }
+
+                fd = next;
+
+                switch (fd->fd_state) {
+		case FDS_IDLE:
+			continue;
+
+                case FDS_WRITE:
+                        FD_SET(fd->fd_fd, &wr);
+                        break;
+
+                case FDS_READ:
+                        FD_SET(fd->fd_fd, &rd);
+                        break;
+                }
+
+                max = fd->fd_fd > max ? fd->fd_fd : max;
+        }
 
 	t = _state.s_timers.t_next;
 
@@ -802,24 +834,27 @@ static void do_cycle(void)
 		tvp = &tv;
 	}
 
-	if (select(max + 1, &fds, NULL, NULL, tvp) == -1) {
+	if (select(max + 1, &rd, &wr, NULL, tvp) == -1) {
 		if (errno == EINTR)
 			return;
-			
+
 		err(1, "select()");
 	}
 
-	if (FD_ISSET(_state.s_divert, &fds)) {
-		divert_next_packet(_state.s_divert);
-		backlog_ctl_process();
-	}
+	fd = &_fds;
 
-	if (FD_ISSET(_state.s_ctl, &fds))
-		handle_ctl(_state.s_ctl);
+	while ((fd = fd->fd_next)) {
+		if (fd->fd_state == FDS_READ && FD_ISSET(fd->fd_fd, &rd))
+			fd->fd_cb(fd);
+
+		if (fd->fd_state == FDS_WRITE && FD_ISSET(fd->fd_fd, &wr))
+			fd->fd_cb(fd);
+	}
 
 	dispatch_timers();
 
-	divert_cycle();
+	if (_divert->cycle)
+		_divert->cycle();
 }
 
 static void do_test(void)
@@ -878,9 +913,38 @@ void _drop_privs(const char *dir, const char *name) {
 	drop_privs(dir, name);
 }
 
+struct fd *add_fd(int f, fd_cb cb)
+{
+	struct fd *fd = xmalloc(sizeof(*fd));
+
+	memset(fd, 0, sizeof(*fd));
+
+	fd->fd_fd    = f;
+	fd->fd_cb    = cb;
+	fd->fd_state = FDS_READ;
+	fd->fd_next  = _fds.fd_next;
+	_fds.fd_next = fd;
+
+	return fd;
+}
+
+static void process_divert(struct fd *fd)
+{
+	_divert->next_packet(fd->fd_fd);
+	backlog_ctl_process();
+}
+
+static void process_ctl(struct fd *fd)
+{
+	handle_ctl(fd->fd_fd);
+}
+
 void tcpcryptd(void)
 {
-	_state.s_divert = divert_open(_conf.cf_divert, packet_handler);
+	_divert = divert_get();
+	assert(_divert);
+
+	_state.s_divert = _divert->open(_conf.cf_divert, packet_handler);
 
 	_state.s_ctl = bind_control_socket(&_state.s_ctl_addr, _conf.cf_ctl);
 
@@ -890,6 +954,9 @@ void tcpcryptd(void)
 
 	if (!_conf.cf_disable && !_conf.cf_disable_network_test)
 		test_network();
+
+	add_fd(_state.s_divert, process_divert);
+	add_fd(_state.s_ctl, process_ctl);
 
 	while (1)
 		do_cycle();
@@ -1046,6 +1113,7 @@ static void usage(char *prog)
 	       "-V\tshow version (or --version)\n"
 	       "-U\t<jail username> (default: " TCPCRYPTD_JAIL_USER ")\n"
 	       "-J\t<jail directory> (default: " TCPCRYPTD_JAIL_DIR ")\n"
+	       "-e\tredirect\n"
 	       , prog, TCPCRYPTD_DIVERT_PORT);
 
 	printf("\nTests:\n");
@@ -1063,12 +1131,13 @@ int main(int argc, char *argv[])
 		errx(1, "WSAStartup()");
 #endif
 
-	_conf.cf_divert	     = TCPCRYPTD_DIVERT_PORT;
-	_conf.cf_ctl  	     = TCPCRYPTD_CONTROL_SOCKET;
-	_conf.cf_test 	     = -1;
-	_conf.cf_test_server = TCPCRYPTD_TEST_SERVER;
-	_conf.cf_jail_dir    = TCPCRYPTD_JAIL_DIR;
-	_conf.cf_jail_user   = TCPCRYPTD_JAIL_USER;
+	_conf.cf_divert	     	      = TCPCRYPTD_DIVERT_PORT;
+	_conf.cf_ctl  	     	      = TCPCRYPTD_CONTROL_SOCKET;
+	_conf.cf_test 	     	      = -1;
+	_conf.cf_test_server 	      = TCPCRYPTD_TEST_SERVER;
+	_conf.cf_jail_dir    	      = TCPCRYPTD_JAIL_DIR;
+	_conf.cf_jail_user   	      = TCPCRYPTD_JAIL_USER;
+	_conf.cf_disable_network_test = 1;
 
 	if (argc == 2 && argv[1][0] == '-' && argv[1][1] == '-') {
 		if (strcmp(argv[1], "--help") == 0) {
@@ -1083,9 +1152,13 @@ int main(int argc, char *argv[])
 		}			
 	}
 
-	while ((ch = getopt(argc, argv, "hp:vdu:camnPt:T:S:Dx:NC:M:r:Rifs:VU:J:"))
+	while ((ch = getopt(argc, argv, "hp:vdu:camnPt:T:S:Dx:NC:M:r:Rifs:VU:J:e"))
 	       != -1) {
 		switch (ch) {
+		case 'e':
+			_conf.cf_rdr = 1;
+			break;
+
 		case 'i':
 			_conf.cf_disable_timers = 1;
 			break;

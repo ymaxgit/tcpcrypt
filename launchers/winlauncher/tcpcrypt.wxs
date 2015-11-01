@@ -29,10 +29,10 @@
 	      </File>
 
               <File Id='tcpcryptd' Name='tcpcryptd.exe' DiskId='1'
-	            Source='../../user/src/.libs/tcpcryptd.exe' />
+	            Source='../../src/.libs/tcpcryptd.exe' />
 
               <File Id='tcnetstat' Name='tcnetstat.exe' DiskId='1'
-	      	Source='../../user/util/.libs/tcnetstat.exe' />
+		    Source='../../util/.libs/tcnetstat.exe' />
 
               <File Id='libcrypto_8' Name='libeay32.dll' DiskId='1'
 	      	    Source='libeay32.dll' />

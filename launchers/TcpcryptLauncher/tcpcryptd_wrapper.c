@@ -16,15 +16,20 @@ void teardown_ipfw_rules();
 
 static const char *pidfile = "/private/tmp/tcpcrypt.pid";
 
+static char work_dir[4096];
+
 void setup_ipfw_rules() {
-	static char *ipfw_cmds[] = {
-		"/sbin/ipfw 60 add divert 666 tcp from any to any 80",
-		"/sbin/ipfw 61 add divert 666 tcp from any 80 to any",
-		"/sbin/ipfw 62 add divert 666 tcp from any to any 7777",
-		"/sbin/ipfw 63 add divert 666 tcp from any 7777 to any",
+        char pf[4096];
+	char *ipfw_cmds[] = {
+                "mkdir -p /var/run/tcpcryptd",
+                "dscl . create /Users/tcpcryptd UniqueID 666",
+                "dscl . create /Users/tcpcryptd PrimaryGroupID 666",
+		pf,
 		NULL
 	};
 	int i;
+
+        snprintf(pf, sizeof(pf), "pfctl -Fa -e -f %s/pf.conf", work_dir);
 	
 	printf("Setting up ipfw rules...\n");
 	for (i = 0; ipfw_cmds[i] != NULL; ++i) {
@@ -37,7 +42,7 @@ void run_tcpcryptd(char *my_argv0) {
 	int fd;
 	FILE *file;
 	struct stat st;
-	char *tcpcryptd;
+	char tcpcryptd[4096];
 
 	/* stop tcpcryptd if it's running */
 	stop_tcpcryptd();
@@ -61,13 +66,10 @@ void run_tcpcryptd(char *my_argv0) {
 	if (fclose(file))
 		err(1, "fclose()");
 	
-	/* find path to tcpcryptd */
-	strcpy(rindex(my_argv0, '/'), "/tcpcryptd");
-	tcpcryptd = my_argv0;
-		
-	
+        snprintf(tcpcryptd, sizeof(tcpcryptd), "%s/tcpcryptd", work_dir);
+
 	printf("Starting tcpcryptd...\n");
-	if (execve(tcpcryptd, NULL, NULL) == -1)
+	if (execl(tcpcryptd, "tcpcryptd", "-e", "-u", ":65531", NULL) == -1)
 		err(1, "execve()");
 }
 
@@ -120,7 +122,7 @@ void stop_tcpcryptd() {
 }
 
 void teardown_ipfw_rules() {
-	static char *cmd = "/sbin/ipfw del 60 61 62 63";		
+	static char *cmd = "pfctl -d";
 	
 	printf("Restoring ipfw to previous configuration...");
 	if (system(cmd))
@@ -131,7 +133,15 @@ void teardown_ipfw_rules() {
 int main(int argc, char **argv) {
 	static char *start = "start", *stop = "stop";
 	char *action = argv[1];
-	
+        char *p;
+
+        snprintf(work_dir, sizeof(work_dir), "%s", argv[0]);
+        p = strrchr(work_dir, '/');
+        if (p)
+            *p = 0;
+
+        printf("Work dir: [%s]\n", work_dir);
+
 	if (setuid(0) != 0) {
 		printf("must be root\n");
 		exit(1);

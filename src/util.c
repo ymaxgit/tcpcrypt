@@ -1,5 +1,6 @@
 #include <stdlib.h>
-#include <err.h>
+
+#include "inc.h"
 
 void *xmalloc(size_t sz)
 {

@@ -1,6 +1,10 @@
 ACLOCAL_AMFLAGS = -I m4
 
-bin_PROGRAMS =  src/tcpcryptd util/tcnetstat util/tcs
+bin_PROGRAMS =  src/tcpcryptd util/tcnetstat
+if !OS_MINGW
+bin_PROGRAMS += util/tcs
+endif
+
 dist_man8_MANS = src/tcpcryptd.man util/tcnetstat.man
 lib_LTLIBRARIES = lib/libtcpcrypt.la
 TESTSUITE = tests/testsuite

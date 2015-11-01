@@ -3594,8 +3594,13 @@ static struct tc *sockopt_get(struct tcpcrypt_ctl *ctl)
 {
 	struct tc *tc = sockopt_find(ctl);
 
-	if (tc)
+	if (tc) {
+		/* XXX it depends */
+		if (tc->tc_rdr_peer)
+			return tc->tc_rdr_peer;
+
 		return tc;
+	}
 
 	if (ctl->tcc_sport == 0)
 		return NULL;

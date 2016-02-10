@@ -3522,8 +3522,11 @@ int tcpcrypt_packet(void *packet, int len, int flags)
 
 	profile_add(1, "tcpcrypt_packet in");
 
-	if (ntohs(ip->ip_len) != len)
+	if (ntohs(ip->ip_len) > len)
 		goto __bad_packet;
+
+	/* len can be larger - Ethernet padding (e.g., RSTs) */
+	len = ntohs(ip->ip_len);
 
 	if (ip->ip_p != IPPROTO_TCP)
 		return DIVERT_ACCEPT;
@@ -3586,7 +3589,7 @@ int tcpcrypt_packet(void *packet, int len, int flags)
 	return rc;
 
 __bad_packet:
-	xprintf(XP_ALWAYS, "Bad packet\n");
+	xprintf(XP_ALWAYS, "Bad packet 2\n");
 	return DIVERT_ACCEPT; /* kernel will drop / deal with it */
 }
 

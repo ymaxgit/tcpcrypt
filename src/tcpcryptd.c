@@ -135,6 +135,23 @@ static void sig(int num)
 	exit(0);
 }
 
+static void dump_state(void)
+{
+	struct fd *fd = &_fds;
+
+	xprintf(XP_ALWAYS, "==== DUMPING STATE ====\n");
+
+	while ((fd = fd->fd_next))
+		xprintf(XP_ALWAYS, "FD %d state %d\n", fd->fd_fd, fd->fd_state);
+
+	xprintf(XP_ALWAYS, "=======================\n");
+}
+
+static void sigusr1(int num)
+{
+	dump_state();
+}
+
 void set_time(struct timeval *tv)
 {
 	_state.s_now	  = *tv;
@@ -1281,12 +1298,19 @@ int main(int argc, char *argv[])
 
 	if (signal(SIGTERM, sig) == SIG_ERR)
 		err(1, "signal(SIGTERM)");
+
+	if (signal(SIGUSR1, sigusr1) == SIG_ERR)
+		err(1, "signal(SIGUSR1)");
+
 #ifndef __WIN32__
 	if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
 		err(1, "signal(SIGPIPE)");
 #endif
 	profile_setopt(PROFILE_DISCARD, 3);
 	profile_setopt(PROFILE_ENABLE, _conf.cf_profile);
+
+	if (atexit(dump_state))
+		err(1, "atexit()");
 
 	pwn();
 	cleanup();

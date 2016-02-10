@@ -21,6 +21,7 @@
 #include <grp.h>
 #include <openssl/err.h>
 #include <pcap.h>
+#include <net/ethernet.h>
 
 #include "tcpcrypt_divert.h"
 #include "tcpcrypt.h"
@@ -33,6 +34,7 @@
 #define INJECT_TOS 0x22
 
 extern int pcap_set_want_pktap(pcap_t *, int);
+extern int pcap_set_filter_info(pcap_t *, const char *, int, bpf_u_int32);
 
 /* from tcpdump */
 typedef struct pktap_header {
@@ -116,9 +118,11 @@ static void divert_next_packet_pcap(int s)
 	struct pcap_pkthdr h;
 	struct pktap_header *pktap;
 	unsigned char *data;
-	int len, ll, rc;
+	int len, rc;
 	struct ip *ip;
+	struct tcphdr *tcp;
 	unsigned char copy[4096];
+	struct ether_header *eh;
 
 	if ((data = (void*) pcap_next(_pcap, &h)) == NULL)
 		errx(1, "pcap_next()");
@@ -134,10 +138,10 @@ static void divert_next_packet_pcap(int s)
 	if (len < sizeof(*pktap))
 		goto __bad_packet;
 
-	ll = pktap->pkt_len + pktap->pkt_llhdrlen;
-
-	if (len < ll)
+	if (len < pktap->pkt_len)
 		goto __bad_packet;
+
+	len -= pktap->pkt_len;
 
 	/* This seems to be the redirected packet to the loopback - an extra
 	 * copy
@@ -145,8 +149,26 @@ static void divert_next_packet_pcap(int s)
 	if (strcmp(pktap->pkt_ifname, "lo0") == 0 && pktap->pkt_pid == -1)
 		return;
 
-	data += ll;
-	len  -= ll;
+	/* deal with link layer */
+	eh = (struct ether_header*) (data + pktap->pkt_len);
+
+	if (pktap->pkt_dlt == DLT_EN10MB) {
+		if (len < pktap->pkt_llhdrlen || len < sizeof(*eh))
+			goto __bad_packet;
+
+		if (ntohs(eh->ether_type) != ETHERTYPE_IP)
+			return;
+	} else if (pktap->pkt_dlt == DLT_NULL) {
+		uint32_t *af = (uint32_t*) eh;
+		if (len < pktap->pkt_llhdrlen || len < sizeof(*af))
+			goto __bad_packet;
+
+		if (*af != PF_INET)
+			return;
+	}
+
+	data = ((unsigned char*) eh) + pktap->pkt_llhdrlen;
+	len  -= pktap->pkt_llhdrlen;
 
 	if (len < sizeof(*ip))
 		goto __bad_packet;
@@ -155,6 +177,17 @@ static void divert_next_packet_pcap(int s)
 
 	/* Don't listen to our own injections */
 	if (ip->ip_tos == INJECT_TOS)
+		return;
+
+	if (ip->ip_p != IPPROTO_TCP)
+		return;
+
+	tcp = (struct tcphdr*) (((char*) ip) + (ip->ip_hl << 2));
+	if ((unsigned long) (tcp + 1) - (unsigned long) ip > len)
+		goto __bad_packet;
+
+	/* XXX grab from conf */
+	if (ntohs(tcp->th_sport) != 80 && ntohs(tcp->th_dport) != 80)
 		return;
 
 	assert(len < sizeof(copy));
@@ -176,7 +209,7 @@ static void divert_next_packet_pcap(int s)
 
 	return;
 __bad_packet:
-	xprintf(XP_ALWAYS, "Bad packet\n");
+	xprintf(XP_ALWAYS, "Bad packet 1\n");
 	return;
 }
 
@@ -201,6 +234,10 @@ static int divert_open_pcap(int port, divert_cb cb)
 	char buf[PCAP_ERRBUF_SIZE];
 	pcap_t *p;
 	int fd;
+	static const char *filter = "proto TCP and port 80";
+#ifndef __DARWIN_UNIX03
+	struct bpf_program fp;
+#endif
 
 	p = pcap_create("any", buf);
 
@@ -219,6 +256,16 @@ static int divert_open_pcap(int port, divert_cb cb)
 		pcap_perror(p, "pcap_set_datalink()");
 		exit(1);
 	}
+
+	/* XXX need pktap_filter_packet for this to work */
+	if (pcap_set_filter_info(p, filter, 0, PCAP_NETMASK_UNKNOWN) == -1)
+		errx(1, "pcap_set_filter_info()");
+#else
+	if (pcap_compile(p, &fp, filter, 0, PCAP_NETMASK_UNKNOWN) == -1)
+		errx(1, "pcap_compile()");
+
+	if (pcap_setfilter(p, &fp) == -1)
+		errx(1, "pcap_setfilter()");
 #endif
 
 	if ((fd = pcap_get_selectable_fd(p)) == -1)

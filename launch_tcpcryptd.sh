@@ -47,7 +47,13 @@ init_jail() {
     if [ $? -ne 0 ]
     then
         echo "Creating user and group '$JAIL_USER'"
-        useradd -s /nonexistent -d /nonexistent -M -U $JAIL_USER
+
+	if [ "$OSNAME" = "Darwin" ] ; then
+		dscl . create /Users/tcpcryptd UniqueID 666
+		dscl . create /Users/tcpcryptd PrimaryGroupID 666
+	else
+		useradd -s /nonexistent -d /nonexistent -M -U $JAIL_USER
+	fi
     fi
 }
 
@@ -69,6 +75,11 @@ unset_iptables() {
 }
 
 bsd_set_ipfw() {
+    if [ "$OSNAME" = "Darwin" ] ; then
+        pfctl -Fa -e -f $BASE/src/pf.conf
+	return
+    fi
+
     echo Tcpcrypting port 80 and 7777...
     ipfw 02 add divert $DIVERT_PORT tcp from any to any $PORT
     ipfw 03 add divert $DIVERT_PORT tcp from any $PORT to any
@@ -78,6 +89,12 @@ bsd_set_ipfw() {
 
 bsd_unset_ipfw() {
     echo Removing ipfw rules and quitting tcpcryptd...
+
+    if [ "$OSNAME" = "Darwin" ] ; then
+        pfctl -Fa -d
+	return
+    fi
+
     ipfw delete 02 03 04 05
     exit
 }

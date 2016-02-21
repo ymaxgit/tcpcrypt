@@ -1,6 +1,7 @@
 #!/bin/sh
 
-TCPCRYPTD=`dirname $0`/src/tcpcryptd
+BASE=`dirname $0`
+TCPCRYPTD=$BASE/src/tcpcryptd
 DIVERT_PORT=666
 PIDFILE=/var/run/tcpcrypt.pid
 JAIL_DIR=/var/run/tcpcryptd
@@ -28,6 +29,8 @@ start_tcpcryptd() {
         -U $JAIL_USER \
         -J $JAIL_DIR \
         -p $DIVERT_PORT \
+	-e \
+	-f \
         $OPTS &
     echo $! > $PIDFILE
     wait $!
@@ -54,28 +57,13 @@ ee() {
 }
 
 set_iptables() {
-    if [ -n "$ONLY_PORTS" ]
-    then
-        IPT_PORTSPEC="-m multiport --ports $ONLY_PORTS"
-    elif [ -n "$OMIT_PORTS" ]
-    then
-        IPT_PORTSPEC="-m multiport \! --ports $OMIT_PORTS"
-    else
-        IPT_PORTSPEC=""
-    fi
-
-    IPT_INPUT="INPUT \! -i lo -p tcp $IPT_PORTSPEC -j NFQUEUE --queue-num $DIVERT_PORT"
-    IPT_OUTPUT="OUTPUT \! -o lo -p tcp $IPT_PORTSPEC -j NFQUEUE --queue-num $DIVERT_PORT"
-
-    ee iptables -I $IPT_INPUT
-    ee iptables -I $IPT_OUTPUT
+    $BASE/src/iptables.sh
 }
 
 unset_iptables() {
     echo Removing iptables rules and quitting tcpcryptd...
 
-    ee iptables -D $IPT_INPUT
-    ee iptables -D $IPT_OUTPUT
+    $BASE/src/iptables.sh -f
 
     exit
 }

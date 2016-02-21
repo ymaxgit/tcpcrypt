@@ -337,7 +337,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 10.5;
 				OTHER_CFLAGS = "-mmacosx-version-min=10.5";
 				PREBINDING = NO;
-				PRODUCT_NAME = launch_tcpcryptd;
+				PRODUCT_NAME = tcpcryptd_wrapper;
 				ZERO_LINK = NO;
 			};
 			name = Release;

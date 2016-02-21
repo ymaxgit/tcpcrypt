@@ -3024,11 +3024,8 @@ static void proxy_connection(struct tc *tc)
 	struct tc *peer = tc->tc_rdr_peer;
 	struct tc *enc = NULL;
 	int out = tc->tc_rdr_state == STATE_RDR_LOCAL;
-
-        if ((rc = read(tc->tc_rdr_fd->fd_fd, p, sizeof(buf) - 256)) <= 0) {
-                kill_rdr(tc);
-                return;
-        }
+	int rdlen = 1500 - 256;
+	struct tc_record *rec = (struct tc_record*) p;
 
 	if (tc->tc_state == STATE_ENCRYPTING)
 		enc = tc;
@@ -3038,6 +3035,53 @@ static void proxy_connection(struct tc *tc)
 	/* XXX fix variables / state */
 	if (peer->tc_rdr_inbound || tc->tc_rdr_inbound)
 		out = !out;
+
+	/* For incoming traffic, first read the header (record), then read the
+	 * rest
+	 */
+	if (enc && !out)
+		rdlen = sizeof(*rec);
+
+        if ((rc = read(tc->tc_rdr_fd->fd_fd, p, rdlen)) <= 0) {
+                kill_rdr(tc);
+                return;
+        }
+
+	/* incoming traffic, read the rest */
+	if (enc && !out) {
+		int got = 0;
+		unsigned char *x = (unsigned char*) (rec + 1);
+
+		if (rc != rdlen) {
+			kill_rdr(tc);
+			return;
+		}
+
+		rdlen = ntohs(rec->tr_len);
+
+		/* XXX */
+		if (rdlen > sizeof(buf) - 256) {
+			xprintf(XP_ALWAYS, "Record too big %d\n", rdlen);
+			kill_rdr(tc);
+			return;
+		}
+
+		/* XXX */
+		while (got < rdlen) {
+			if ((rc = read(tc->tc_rdr_fd->fd_fd,
+				       x + got, rdlen - got)) <= 0) {
+				if (errno == EAGAIN)
+					continue;
+
+				kill_rdr(tc);
+				return;
+			}
+
+			got += rc;
+		}
+
+		rc = got + sizeof(*rec);
+	}
 
 	/* XXX */
 	fake_ip_tcp(ip, tcp, rc);
@@ -3650,6 +3694,7 @@ static int do_sockopt(int set, struct tc *tc, int opt, void *val,
 	case STATE_DISABLED:
 	case STATE_REKEY_SENT:
 	case STATE_REKEY_RCVD:
+	case STATE_RDR_PLAIN:
 		break;
 
 	default:

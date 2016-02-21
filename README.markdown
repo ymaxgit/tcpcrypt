@@ -23,9 +23,9 @@ Installing tcpcrypt
     sudo ./launch_tcpcryptd.sh
 
 The launch script starts tcpcryptd and adds firewall rules to divert all TCP
-traffic -- *except* that which is already encrypted, like SSH -- to tcpcryptd.
-When the script exits (on Ctrl-C or `kill`), it restores your firewall config
-to its former state -- *no permanent changes are made*.
+traffic on port 80 to tcpcryptd.  When the script exits (on Ctrl-C or `kill`),
+it restores your firewall config to its former state -- *no permanent changes
+are made*.
 
 On Linux, you must first install libnfnetlink, libnetfilter_queue, and libcap.
 
@@ -47,17 +47,6 @@ reloading the URL above.
 
 Compare this tcpdump output, which appears encrypted (or at least unreadable),
 with the cleartext packets you would see without tcpcryptd running.
-
-A final netcat example:
-
-    sudo ./launch_tcpcryptd.sh & 
-    nc -l 7777 &
-    sudo tcpdump -i lo -n -s0 -vvvv -X tcp port 7777 &
-    echo hello, world! | nc localhost 7777
-    
-    # clean up
-    sudo killall tcpcryptd tcpdump
-
 
 Troubleshooting
 ---------------

@@ -72,8 +72,7 @@ int do_divert_open(void)
 		"ip and "
 		"((outbound and tcp.DstPort == 80) or "
 		" (inbound and tcp.SrcPort == 80) or "
-		" (outbound and tcp.DstPort == 7777) or "
-		" (inbound and tcp.SrcPort == 7777)"
+		" (outbound and tcp.SrcPort == 65530)"
 		") and "
 		"ip.DstAddr != 127.0.0.1 and "
 		"ip.SrcAddr != 127.0.0.1",

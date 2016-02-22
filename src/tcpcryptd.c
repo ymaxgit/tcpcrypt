@@ -1299,13 +1299,14 @@ int main(int argc, char *argv[])
 	if (signal(SIGTERM, sig) == SIG_ERR)
 		err(1, "signal(SIGTERM)");
 
+#ifndef __WIN32__
 	if (signal(SIGUSR1, sigusr1) == SIG_ERR)
 		err(1, "signal(SIGUSR1)");
 
-#ifndef __WIN32__
 	if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
 		err(1, "signal(SIGPIPE)");
 #endif
+
 	profile_setopt(PROFILE_DISCARD, 3);
 	profile_setopt(PROFILE_ENABLE, _conf.cf_profile);
 

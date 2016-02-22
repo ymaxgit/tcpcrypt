@@ -176,9 +176,7 @@ static void checksum_tcp_linux(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 
 void checksum_tcp(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
-	if (tc->tc_csum && 0)
-		checksum_tcp_generic(ip, tcp, tc->tc_csum);
-	else if (_use_linux)
+	if (tc && _use_linux)
 		checksum_tcp_linux(tc, ip, tcp);
 	else
 		checksum_tcp_generic(ip, tcp, 0);

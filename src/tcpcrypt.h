@@ -263,7 +263,7 @@ struct tc {
 	int			tc_rdr_state;
 	int			tc_rdr_connected;
 	struct fd		*tc_rdr_fd;
-	unsigned char		tc_rdr_buf[1500];
+	unsigned char		tc_rdr_buf[4096];
 	int			tc_rdr_len;
 	struct tc		*tc_rdr_peer;
 	struct sockaddr_in	tc_rdr_addr;
@@ -367,5 +367,7 @@ extern int  tcpcryptd_getsockopt(struct tcpcrypt_ctl *s, int opt, void *val,
 			        unsigned int *len);
 extern void tcpcrypt_register_cipher(struct cipher_list *c);
 extern void tcpcrypt_init(void);
+
+extern struct tcphdr *get_tcp(struct ip *ip);
 
 #endif /* __SRC_TCPCRYPT_H__ */

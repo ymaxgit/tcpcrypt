@@ -192,7 +192,11 @@ static void do_kill_rdr(struct tc *tc)
 
 	if (fd) {
 		fd->fd_state = FDS_DEAD;
+#ifdef __WIN32__
+		closesocket(fd->fd_fd);
+#else
 		close(fd->fd_fd);
+#endif
 		fd->fd_fd = -1;
 		tc->tc_rdr_fd = NULL;
 	}
@@ -412,7 +416,8 @@ static void enable_encryption(struct tc *tc)
 {
 	profile_add(1, "enable_encryption in");
 
-	tc->tc_state = STATE_ENCRYPTING;
+	tc->tc_state   = STATE_ENCRYPTING;
+	tc->tc_rdr_len = 0;
 
 	if (!session_resume(tc)) {
 		set_expand_key(tc, &tc->tc_ss);
@@ -755,7 +760,7 @@ static void *find_opt(struct tcphdr *tcp, unsigned char opt)
 	return NULL;
 }
 
-static void checksum_packet(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
+void checksum_packet(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
 	checksum_ip(ip);
 	checksum_tcp(tc, ip, tcp);
@@ -3016,10 +3021,10 @@ static void fake_ip_tcp(struct ip *ip, struct tcphdr *tcp, int len)
 
 static void proxy_connection(struct tc *tc)
 {
-        unsigned char buf[4096];
-	struct ip *ip = (struct ip *) buf;
+	struct ip *ip = (struct ip *) tc->tc_rdr_buf;
 	struct tcphdr *tcp = (struct tcphdr*) (ip + 1);
 	unsigned char *p = (unsigned char*) (tcp + 1);
+	unsigned char *rp = p;
         int rc;
 	struct tc *peer = tc->tc_rdr_peer;
 	struct tc *enc = NULL;
@@ -3039,48 +3044,54 @@ static void proxy_connection(struct tc *tc)
 	/* For incoming traffic, first read the header (record), then read the
 	 * rest
 	 */
-	if (enc && !out)
-		rdlen = sizeof(*rec);
+	if (enc && !out) {
+		/* we're reading new data - read header */
+		if (tc->tc_rdr_len == 0)
+			rdlen = sizeof(*rec);
+		else {
+			/* we already read the header - read the rest */
+			rdlen = ntohs(rec->tr_len) 
+				- (tc->tc_rdr_len - sizeof(*rec));
 
-        if ((rc = read(tc->tc_rdr_fd->fd_fd, p, rdlen)) <= 0) {
+			assert(rdlen > 0);
+			rp += tc->tc_rdr_len;
+		}
+	}
+
+        if ((rc = recv(tc->tc_rdr_fd->fd_fd, rp, rdlen, 0)) <= 0) {
                 kill_rdr(tc);
                 return;
         }
 
 	/* incoming traffic, read the rest */
 	if (enc && !out) {
-		int got = 0;
-		unsigned char *x = (unsigned char*) (rec + 1);
-
-		if (rc != rdlen) {
-			kill_rdr(tc);
-			return;
-		}
-
-		rdlen = ntohs(rec->tr_len);
-
-		/* XXX */
-		if (rdlen > sizeof(buf) - 256) {
-			xprintf(XP_ALWAYS, "Record too big %d\n", rdlen);
-			kill_rdr(tc);
-			return;
-		}
-
-		/* XXX */
-		while (got < rdlen) {
-			if ((rc = read(tc->tc_rdr_fd->fd_fd,
-				       x + got, rdlen - got)) <= 0) {
-				if (errno == EAGAIN)
-					continue;
-
+		/* we just started */
+		if (tc->tc_rdr_len == 0) {
+			if (rc != rdlen) {
 				kill_rdr(tc);
 				return;
 			}
+		
+			rdlen = ntohs(rec->tr_len);
 
-			got += rc;
+			/* XXX */
+			if (rdlen > sizeof(tc->tc_rdr_buf) - 256) {
+				xprintf(XP_ALWAYS, "Record too big %d\n", rdlen);
+				kill_rdr(tc);
+				return;
+			}
 		}
 
-		rc = got + sizeof(*rec);
+		tc->tc_rdr_len += rc;
+		assert(tc->tc_rdr_len >= sizeof(*rec));
+
+		/* need to read more */
+		if ((tc->tc_rdr_len - sizeof(*rec)) < ntohs(rec->tr_len))
+			return;
+
+		/* good to go! */
+		rc = tc->tc_rdr_len;
+		tc->tc_rdr_len = 0;
 	}
 
 	/* XXX */
@@ -3101,7 +3112,7 @@ static void proxy_connection(struct tc *tc)
 	}
 
         /* XXX assuming non-blocking write */
-        if (write(peer->tc_rdr_fd->fd_fd, p, rc) != rc) {
+        if (send(peer->tc_rdr_fd->fd_fd, p, rc, 0) != rc) {
                 kill_rdr(tc);
                 return;
         }
@@ -3114,6 +3125,7 @@ static void rdr_handshake_complete(struct tc *tc)
 	if (!tc->tc_rdr_fd)
 		return;
 
+#ifndef __WIN32__
 	/* stop intercepting handshake - all ENO opts have been set */
 	if (setsockopt(tc->tc_rdr_fd->fd_fd, IPPROTO_IP, IP_TOS, &tos,
 		       sizeof(tos)) == -1) {
@@ -3121,6 +3133,9 @@ static void rdr_handshake_complete(struct tc *tc)
 	    kill_rdr(tc);
 	    return;
 	}
+#else
+	win_handshake_complete(tc->tc_rdr_fd->fd_fd);
+#endif
 }
 
 static void rdr_process_init(struct tc *tc)
@@ -3140,7 +3155,7 @@ static void rdr_process_init(struct tc *tc)
 	/* make sure we read only init1 and not past it.
 	 * First, figure out how big init is.  Then read that.
 	 */
-	if ((len = read(fd->fd_fd, i1, sizeof(*i1))) != sizeof(*i1))
+	if ((len = recv(fd->fd_fd, i1, sizeof(*i1), 0)) != sizeof(*i1))
 		goto __kill_rdr;
 
 	rem -= sizeof(*i1);
@@ -3164,7 +3179,7 @@ static void rdr_process_init(struct tc *tc)
 	if (!FD_ISSET(fd->fd_fd, &fds))
 		goto __kill_rdr;
 
-	if (read(fd->fd_fd, i1 + 1, rem) != rem)
+	if (recv(fd->fd_fd, i1 + 1, rem, 0) != rem)
 		goto __kill_rdr;
 
 	/* XXX */
@@ -3192,7 +3207,7 @@ static void rdr_process_init(struct tc *tc)
 		if (tc->tc_state != STATE_INIT2_SENT)
 			goto __kill_rdr;
 
-		if (write(fd->fd_fd, tc->tc_rdr_buf, tc->tc_rdr_len)
+		if (send(fd->fd_fd, tc->tc_rdr_buf, tc->tc_rdr_len, 0)
 			  != tc->tc_rdr_len)
 			goto __kill_rdr;
 
@@ -3300,9 +3315,11 @@ static void rdr_new_connection(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 
 	set_nonblocking(s);
 
+#ifndef __WIN32__
 	/* signal handshake to firewall */
         if (setsockopt(s, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)) == -1)
-            err(1, "setsockopt()");
+            err(1, "setsockopt(IP_TOS)");
+#endif
 
 	/* XXX bypass firewall */
         if (in) {
@@ -3322,6 +3339,10 @@ static void rdr_new_connection(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 		}
 	}
 
+#ifdef __WIN32__
+	win_dont_rdr(s);
+#endif
+
 	/* XXX */
 	if (in && !tc->tc_rdr_drop_sa) {
 		to.sin_port = htons(REDIRECT_PORT);
@@ -3330,6 +3351,10 @@ static void rdr_new_connection(struct tc *tc, struct ip *ip, struct tcphdr *tcp,
 
 		if (getsockname(s, (struct sockaddr*) &from, &len) == -1)
 			err(1, "getsockname()");
+
+#ifdef __WIN32__
+		from.sin_addr.s_addr = win_local_ip();
+#endif
 	}
 
         /* create peer */
@@ -3449,7 +3474,8 @@ static int rdr_syn_ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	}
 
 	if (tc->tc_state == STATE_DISABLED) {
-		tc->tc_state = STATE_RDR_PLAIN;
+		tc->tc_state   = STATE_RDR_PLAIN;
+		tc->tc_rdr_len = 0;
 		rdr_handshake_complete(tc);
 	}
 
@@ -3464,8 +3490,8 @@ static int rdr_ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 	if (tc->tc_state == STATE_PKCONF_RCVD) {
 		rc = do_output_pkconf_rcvd(tc, ip, tcp, 0);
 
-		if (write(tc->tc_rdr_fd->fd_fd, tc->tc_rdr_buf, tc->tc_rdr_len)
-		    != tc->tc_rdr_len) {
+		if (send(tc->tc_rdr_fd->fd_fd, tc->tc_rdr_buf, tc->tc_rdr_len,
+			 0) != tc->tc_rdr_len) {
 			kill_rdr(tc);
 			return DIVERT_DROP;
 		}
@@ -3510,8 +3536,10 @@ static int rdr_syn(struct tc *tc, struct ip *ip, struct tcphdr *tcp, int flags)
 		case STATE_CLOSED:
 			do_input_closed(tc, ip, tcp);
 
-			if (tc->tc_state == STATE_DISABLED)
-				tc->tc_state = STATE_RDR_PLAIN;
+			if (tc->tc_state == STATE_DISABLED) {
+				tc->tc_state   = STATE_RDR_PLAIN;
+				tc->tc_rdr_len = 0;
+			}
 
 			/* XXX clamp MSS */
 			return DIVERT_ACCEPT;

@@ -31,8 +31,6 @@
 #include "crypto.h"
 #include "checksum.h"
 
-#define INJECT_TOS 0x22
-
 extern int pcap_set_want_pktap(pcap_t *, int);
 extern int pcap_set_filter_info(pcap_t *, const char *, int, bpf_u_int32);
 

@@ -95,7 +95,7 @@ static void start()
 
 	get_path(cmd);
 	snprintf(cmd + strlen(cmd), sizeof(cmd) - strlen(cmd), "tcpcryptd.exe");
-	snprintf(arg, sizeof(arg), "%s -u :65532", "tcpcryptd.exe");
+	snprintf(arg, sizeof(arg), "%s -u :65532 -e", "tcpcryptd.exe");
 
 	memset(&si, 0, sizeof(si));
 	si.cb		 = sizeof(si);

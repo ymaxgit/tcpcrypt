@@ -15,24 +15,6 @@
 #include "crypto.h"
 #include "profile.h"
 
-static struct crypt_pub *RSA_HKDF_new(void)
-{
-	struct crypt_pub *cp = xmalloc(sizeof(*cp));
-
-	memset(cp, 0, sizeof(*cp));
-
-	cp->cp_hkdf       = crypt_HKDF_SHA256_new();
-	cp->cp_pub        = crypt_RSA_new();
-	cp->cp_n_c        = 32;
-	cp->cp_n_s        = 48;
-	cp->cp_k_len      = 32;
-	cp->cp_min_key    = (2048 / 8);
-	cp->cp_max_key    = (4096 / 8);
-	cp->cp_cipher_len = (4096 / 8);
-
-	return cp;
-}
-
 static struct crypt_pub *ECDHE_HKDF_new(struct crypt*(*ctr)(void), int klen)
 {
 	struct crypt_pub *cp = xmalloc(sizeof(*cp));

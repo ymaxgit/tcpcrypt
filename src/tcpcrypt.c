@@ -3145,7 +3145,6 @@ static void rdr_process_init(struct tc *tc)
 	int len;
 	struct ip *ip = (struct ip *) buf;
 	struct tcphdr *tcp = (struct tcphdr*) (ip + 1);
-	int rc;
 	struct fd *fd = tc->tc_rdr_fd;
 	struct tc_init1 *i1 = (struct tc_init1*) &buf[headroom];
 	int rem = sizeof(buf) - headroom;
@@ -3188,8 +3187,7 @@ static void rdr_process_init(struct tc *tc)
 	switch (tc->tc_state) {
 	/* outbound connections */
 	case STATE_INIT1_SENT:
-		rc = do_input_init1_sent(tc, ip, tcp);
-
+		do_input_init1_sent(tc, ip, tcp);
 		rdr_handshake_complete(tc);
 		break;
 
@@ -3484,11 +3482,9 @@ static int rdr_syn_ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 
 static int rdr_ack(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
-	int rc;
-
 	/* send init1 */
 	if (tc->tc_state == STATE_PKCONF_RCVD) {
-		rc = do_output_pkconf_rcvd(tc, ip, tcp, 0);
+		do_output_pkconf_rcvd(tc, ip, tcp, 0);
 
 		if (send(tc->tc_rdr_fd->fd_fd, tc->tc_rdr_buf, tc->tc_rdr_len,
 			 0) != tc->tc_rdr_len) {

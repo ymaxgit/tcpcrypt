@@ -209,7 +209,7 @@ static void kill_rdr(struct tc *tc)
 	do_kill_rdr(tc);
 
 	if (peer) {
-		assert(peer->tc_rdr_peer = tc);
+		assert(peer->tc_rdr_peer == tc);
 
 		/* XXX will still leak conn and tc (if we don't receive other
 		 * packets) */

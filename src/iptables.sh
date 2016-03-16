@@ -10,10 +10,7 @@ fi
 
 iptables $OP INPUT -i lo -p tcp --dport 65530 -m tos --tos 0x22 -j ACCEPT
 
-iptables $OP INPUT -p tcp --dport 65530 --tcp-flags ALL SYN \
-	-j NFQUEUE --queue-num 666
-
-iptables $OP INPUT -p tcp -d 127.0.0.1 --dport 65530 --tcp-flags ALL SYN \
+iptables $OP INPUT -p tcp \! -s 127.0.0.1 --dport 65530 --tcp-flags ALL SYN \
 	-j NFQUEUE --queue-num 666
 
 iptables $OP INPUT -p tcp --sport $PR --tcp-flags ALL SYN,ACK \
@@ -33,7 +30,8 @@ iptables -t nat $OP PREROUTING -p tcp --dport $PR -j REDIRECT --to-port 65530
 iptables -t nat $OP OUTPUT -p tcp --dport $PR -m owner --uid-owner tcpcryptd \
 	-j ACCEPT
 
-iptables -t nat $OP OUTPUT -p tcp --dport $PR -j REDIRECT --to-port 65530
+iptables -t nat $OP OUTPUT -p tcp \! -o lo --dport $PR \
+	-j REDIRECT --to-port 65530
 
 ###### clean up all ths tos tricks we've been doing
 iptables -t mangle $OP POSTROUTING -m tos --tos 0x04 -j TOS --set-tos 0x00

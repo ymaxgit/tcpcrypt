@@ -4159,6 +4159,14 @@ static void redirect_listen_handler(struct fd *fd)
         }
 
 	peer = tc->tc_rdr_peer;
+	if (!peer) {
+		xprintf(XP_ALWAYS, "Redirected connection from %s:%d: tc %p has no peer; "
+				   "closing connection\n",
+			inet_ntoa(s_in.sin_addr), ntohs(s_in.sin_port), tc);
+		close(dude);
+		kill_rdr(tc);
+		return;
+	}
 
 	if (tc->tc_rdr_inbound) {
 		struct tc *tmp = peer;

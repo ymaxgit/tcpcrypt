@@ -5,7 +5,7 @@ TCPCRYPTD=$BASE/src/tcpcryptd
 DIVERT_PORT=666
 PIDFILE=/var/run/tcpcrypt.pid
 JAIL_DIR=/var/run/tcpcryptd
-JAIL_USER=tcpcryptd
+DAEMON_USER=tcpcryptd
 
 OSNAME=`uname -s`
 
@@ -14,9 +14,10 @@ then
     # set either ONLY_PORTS or OMIT_PORTS, in a manner acceptable to the
     # "multiport" extension.  see iptables-extensions(8)
 
+    # EITHER enable specific ports:
     # ONLY_PORTS="80,7777"
 
-    # exclude already-encrypted services:
+    # OR exclude already-encrypted services:
     OMIT_PORTS="22,261,443,563,614,636,684,695,989,990,992:995"
 else
     # for ipfw users:
@@ -26,7 +27,7 @@ fi
 
 start_tcpcryptd() {
     LD_LIBRARY_PATH=lib/ $TCPCRYPTD \
-        -U $JAIL_USER \
+        -U $DAEMON_USER \
         -J $JAIL_DIR \
         -p $DIVERT_PORT \
 	-e \
@@ -43,16 +44,16 @@ init_jail() {
         (umask 077 && mkdir $JAIL_DIR)
     fi
 
-    id $JAIL_USER >/dev/null 2>&1
+    id $DAEMON_USER >/dev/null 2>&1
     if [ $? -ne 0 ]
     then
-        echo "Creating user and group '$JAIL_USER'"
+        echo "Creating user and group '$DAEMON_USER'"
 
 	if [ "$OSNAME" = "Darwin" ] ; then
 		dscl . create /Users/tcpcryptd UniqueID 666
 		dscl . create /Users/tcpcryptd PrimaryGroupID 666
 	else
-		useradd -s /nonexistent -d /nonexistent -M -U $JAIL_USER
+		useradd -s /usr/bin/nologin -d / -M -U $DAEMON_USER
 	fi
     fi
 }
@@ -63,13 +64,20 @@ ee() {
 }
 
 set_iptables() {
-    $BASE/src/iptables.sh
+    export DAEMON_USER DIVERT_PORT ONLY_PORTS OMIT_PORTS
+    $BASE/src/iptables.sh start
+    if [ $? -ne 0 ]
+    then
+        echo "Couldn't set iptables" >&2
+        exit 1
+    fi
 }
 
 unset_iptables() {
     echo Removing iptables rules and quitting tcpcryptd...
 
-    $BASE/src/iptables.sh -f
+    export DAEMON_USER DIVERT_PORT ONLY_PORTS OMIT_PORTS
+    $BASE/src/iptables.sh stop
 
     exit
 }

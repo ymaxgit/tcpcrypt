@@ -91,7 +91,7 @@ util_tcs_CFLAGS = $(AM_CFLAGS)
 # src_tcpcryptd
 
 src_tcpcryptd_SOURCES = \
-	src/tcpcryptd.c src/tcpcrypt.c src/crypto.c src/crypto_rsa.c src/crypto_aes.c \
+	src/tcpcryptd.c src/tcpcrypt.c src/crypto.c src/crypto_aes.c \
 	src/crypto_hmac.c src/crypto_dummy.c src/profile.c src/checksum.c src/test.c  \
 	src/crypto_hkdf.c \
 	src/crypto_reg.c src/crypto_ecdhe.c \

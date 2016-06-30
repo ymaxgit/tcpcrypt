@@ -38,7 +38,13 @@ enum {
 
 struct tc_cipher_spec {
 	uint8_t  tcs_algo;
-} __attribute__ ((gcc_struct, __packed__));
+}
+#if defined(__clang__)
+__attribute__ ((__packed__))
+#else
+__attribute__ ((gcc_struct, __packed__))
+#endif
+;
 
 struct tc_scipher {
 	uint8_t sc_algo;

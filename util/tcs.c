@@ -279,8 +279,9 @@ static void handle_raw(struct sock *s)
 			break;
 
 		switch (opt) {
-		case TCPOPT_CRYPT:
-			found_crypt(ip, th);
+		case TCPOPT_EXP:
+			if (len >= 2 && ntohs(*((uint16_t*) p)) == EXID_ENO)
+				found_crypt(ip, th);
 			break;
 		}
 

@@ -10,7 +10,6 @@
 #define TC_OPT_VLEN	0x80
 
 enum {
-	TC_RESUME	     = 0x20,
 	TC_CIPHER_ECDHE_P256 = 0x21,
 	TC_CIPHER_ECDHE_P521 = 0x22,
 };
@@ -127,12 +126,7 @@ struct tc_sess {
 };
 
 struct tc_sid {
-        uint8_t ts_sid[9];
-} __attribute__ ((__packed__));
-
-struct tc_sess_opt {
-	uint8_t	      ts_opt;
-	struct tc_sid ts_sid;
+        uint8_t ts_sid[10];
 } __attribute__ ((__packed__));
 
 #define TCF_FIN 0x1
@@ -306,15 +300,16 @@ struct tco_rekeystream {
 #define TCPOPT_SKEETER	16
 #define TCPOPT_BUBBA	17
 #define TCPOPT_MD5	19
-#define TCPOPT_CRYPT	69
-#define TCPOPT_MAC	70
-#define TCPOPT_ENO	71
+#define TCPOPT_EXP	253
+
+#define EXID_ENO	0x454E
 
 struct tcpopt_eno {
 	uint8_t		 toe_kind;
 	uint8_t		 toe_len;
+	uint16_t	 toe_exid;
 	uint8_t		 toe_opts[0];
-};
+} __attribute__ ((__packed__));
 
 struct tcpopt_mac {
 	uint8_t		tom_kind;

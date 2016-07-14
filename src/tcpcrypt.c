@@ -283,9 +283,15 @@ static void compute_mk(struct tc *tc, struct stuff *out)
 	out->s_len = len;
 }
 
-static void compute_sid(struct tc *tc, struct stuff *out)
+static void compute_sid(struct tc *tc, struct stuff *out, int v)
 {
 	do_expand(tc, CONST_SESSID, out);
+
+	assert(out->s_len + 1 <= sizeof(out->s_data));
+	memmove(out->s_data + 1, out->s_data, out->s_len);
+
+	out->s_data[0] = tc->tc_cipher_pkey.tcs_algo | v;
+	out->s_len++;
 }
 
 static void set_expand_key(struct tc *tc, struct stuff *s)
@@ -322,7 +328,7 @@ static void session_cache(struct tc *tc)
 	set_expand_key(tc, &tc->tc_nk);
 	profile_add(1, "session_cache crypto_mac_set_key");
 
-	compute_sid(tc, &s->ts_sid);
+	compute_sid(tc, &s->ts_sid, TC_OPT_VLEN);
 	profile_add(1, "session_cache compute_sid");
 
 	compute_mk(tc, &s->ts_mk);
@@ -424,7 +430,7 @@ static void enable_encryption(struct tc *tc)
 
 		profile_add(1, "enable_encryption mac set key");
 
-		compute_sid(tc, &tc->tc_sid);
+		compute_sid(tc, &tc->tc_sid, 0);
 		profile_add(1, "enable_encryption compute SID");
 
 		compute_mk(tc, &tc->tc_mk);
@@ -912,16 +918,45 @@ static struct tc_sess *session_find_host(struct tc *tc, struct in_addr *in,
 	return NULL;
 }
 
+static int is_eno(int tcpop, void *data, int len)
+{
+	uint16_t *exid = data;
+
+	if (tcpop != TCPOPT_EXP)
+		return 0;
+
+	if (len < sizeof(*exid))
+		return 0;
+
+	if (ntohs(*exid) != EXID_ENO)
+		return 0;
+
+	return 1;
+}
+
+static int get_eno(int tcpop, void **data, int *len)
+{
+	if (!is_eno(tcpop, *data, *len))
+		return 0;
+
+	assert(*len >= 2);
+
+	*len -= 2;
+	*data = ((unsigned char*) *data) + 2;
+
+	return 1;
+}
+
 static int do_set_eno_transcript(struct tc *tc, int tcpop, int len, void *data)
 {
 	uint8_t *p = &tc->tc_eno[tc->tc_eno_len];
 
-	if (tcpop != TCPOPT_ENO)
+	if (!is_eno(tcpop, data, len))
 		return 0;
 
 	assert(len + 2 + tc->tc_eno_len < sizeof(tc->tc_eno));
 
-	*p++ = TCPOPT_ENO;
+	*p++ = TCPOPT_EXP;
 	*p++ = len + 2;
 
 	memcpy(p, data, len);
@@ -931,19 +966,25 @@ static int do_set_eno_transcript(struct tc *tc, int tcpop, int len, void *data)
 	return 0;
 }
 
+static void set_eno(struct tcpopt_eno *eno, int len)
+{
+	eno->toe_kind = TCPOPT_EXP;
+	eno->toe_len  = len;
+	eno->toe_exid = htons(0x454E);
+}
+
 static void set_eno_transcript(struct tc *tc, struct tcphdr *tcp)
 {
-	unsigned char *p;
+	struct tcpopt_eno *eno;
 
 	foreach_opt(tc, tcp, do_set_eno_transcript);
 
-	assert(tc->tc_eno_len + 2 < sizeof(tc->tc_eno));
+	assert(tc->tc_eno_len + sizeof(*eno) < sizeof(tc->tc_eno));
 
-	p = &tc->tc_eno[tc->tc_eno_len];
-	*p++ = TCPOPT_ENO;
-	*p++ = 2;
+	eno = (struct tcpopt_eno*) &tc->tc_eno[tc->tc_eno_len];
+	set_eno(eno, sizeof(*eno));
 
-	tc->tc_eno_len += 2;
+	tc->tc_eno_len += sizeof(*eno);
 }
 
 static void send_rst(struct tc *tc)
@@ -1021,7 +1062,7 @@ static int do_output_closed(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
 	struct tc_sess *ts = tc->tc_sess;
 	struct tcpopt_eno *eno;
-	struct tc_sess_opt *sopt;
+	struct tc_sid *sopt;
 	int len;
 	uint8_t *p;
 
@@ -1051,8 +1092,7 @@ static int do_output_closed(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 		return DIVERT_ACCEPT;
 	}
 
-	eno->toe_kind = TCPOPT_ENO;
-	eno->toe_len  = len;
+	set_eno(eno, len);
 
 	memcpy(eno->toe_opts, tc->tc_ciphers_pkey, tc->tc_ciphers_pkey_len);
 
@@ -1068,12 +1108,10 @@ static int do_output_closed(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 			xprintf(XP_DEBUG, "Can't find session for host\n");
 	} else {
 		/* session caching */
-		sopt = (struct tc_sess_opt*) p;
+		sopt = (struct tc_sid*) p;
 
-		sopt->ts_opt = TC_RESUME | TC_OPT_VLEN;
-
-		assert(ts->ts_sid.s_len >= sizeof(sopt->ts_sid));
-		memcpy(&sopt->ts_sid, &ts->ts_sid.s_data, sizeof(sopt->ts_sid));
+		assert(ts->ts_sid.s_len >= sizeof(*sopt));
+		memcpy(sopt, &ts->ts_sid.s_data, sizeof(*sopt));
 
 		tc->tc_state = STATE_NEXTK1_SENT;
 		assert(!ts->ts_used || ts == tc->tc_sess);
@@ -1107,8 +1145,7 @@ static int do_output_hello_rcvd(struct tc *tc, struct ip *ip,
 		return DIVERT_ACCEPT;
 	}
 
-	eno->toe_kind = TCPOPT_ENO;
-	eno->toe_len  = len;
+	set_eno(eno, len);
 
 	memcpy(eno->toe_opts, &tc->tc_cipher_pkey, sizeof(tc->tc_cipher_pkey));
 
@@ -1329,8 +1366,8 @@ static int add_eno(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 		tc->tc_state = STATE_DISABLED;
 		return -1;
 	}
-	eno->toe_kind = TCPOPT_ENO;
-	eno->toe_len  = len;
+
+	set_eno(eno, len);
 
 	return 0;
 }
@@ -1721,6 +1758,7 @@ static int do_output_nextk1_rcvd(struct tc *tc, struct ip *ip,
 {
 	struct tcpopt_eno *eno;
 	int len;
+	int i = 0;
 
 	if (!tc->tc_sess)
 		return do_output_hello_rcvd(tc, ip, tcp);
@@ -1737,12 +1775,12 @@ static int do_output_nextk1_rcvd(struct tc *tc, struct ip *ip,
 		return DIVERT_ACCEPT;
 	}
 
-	eno->toe_kind    = TCPOPT_ENO;
-	eno->toe_len     = len;
-	eno->toe_opts[0] = TC_RESUME;
+	set_eno(eno, len);
 
 	if (tc->tc_app_support)
-		eno->toe_opts[1] = tc->tc_app_support << 1;
+		eno->toe_opts[i++] = tc->tc_app_support << 1;
+
+	eno->toe_opts[i++] = tc->tc_sess->ts_pub_spec | TC_OPT_VLEN;
 
 	tc->tc_state = STATE_NEXTK2_SENT;
 
@@ -1914,29 +1952,18 @@ static void check_app_support(struct tc *tc, uint8_t *data, int len)
 static int can_session_resume(struct tc *tc, uint8_t *data, int len)
 {
 	int i;
-	struct tc_sess_opt *sopt;
+	struct tc_sid *sid = NULL;
 
-	for (i = 0; i < len; i++) {
+	for (i = 0; i <= (len - (int) sizeof(*sid)); i++) {
+		/* XXX should check spec / other opts of var length */
 		if (data[i] & TC_OPT_VLEN) {
-			if ((data[i] & ~TC_OPT_VLEN) != TC_RESUME)
-				return 0;
+			sid = (struct tc_sid*) &data[i];
 
-			break;
+			if ((tc->tc_sess = session_find(tc, sid)))
+				break;
 		}
 	}
 
-	if (i == len)
-		return 0;
-
-	sopt = (struct tc_sess_opt*) &data[i];
-	assert(sopt->ts_opt == (TC_RESUME | TC_OPT_VLEN));
-
-	if (sizeof(*sopt) != (len - i)) {
-		xprintf(XP_ALWAYS, "Bad NEXTK1\n");
-		return 0;
-	}
-
-	tc->tc_sess = session_find(tc, &sopt->ts_sid);
 	profile_add(2, "found session");
 
 	if (!tc->tc_sess)
@@ -1973,11 +2000,10 @@ static int opt_input_closed(struct tc *tc, int tcpop, int len, void *data)
 
 	profile_add(2, "opt_input_closed in");
 
-	switch (tcpop) {
-	case TCPOPT_ENO:
+	if (get_eno(tcpop, &data, &len))
 		input_closed_eno(tc, data, len);
-		break;
 
+	switch (tcpop) {
 	case TCPOPT_SACK_PERMITTED:
 		p     = data;
 		p[-2] = TCPOPT_NOP;
@@ -2070,19 +2096,34 @@ static void *alloc_retransmit(struct tc *tc)
 	return r->r_packet;
 }
 
+static struct tcpopt_eno *find_eno(struct tcphdr *tcp)
+{
+	struct tcpopt_eno *eno = find_opt(tcp, TCPOPT_EXP);
+
+	if (!eno)
+		return NULL;
+
+	assert(eno->toe_len >= 2);
+
+	if (is_eno(eno->toe_kind, (unsigned char*) eno + 2, eno->toe_len - 2))
+		return eno;
+
+	return NULL;
+}
+
 static int do_input_hello_sent(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 {
 	struct tc_cipher_spec *cipher;
 	struct tcpopt_eno *eno;
 	int len;
 
-	if (!(eno = find_opt(tcp, TCPOPT_ENO))) {
+	if (!(eno = find_eno(tcp))) {
 		tc->tc_state = STATE_DISABLED;
 
 		return DIVERT_ACCEPT;
 	}
 
-	len = eno->toe_len - 2;
+	len = eno->toe_len - sizeof(*eno);
 	assert(len >= 0);
 
 	check_app_support(tc, eno->toe_opts, len);
@@ -2329,7 +2370,7 @@ static int do_input_pkconf_sent(struct tc *tc, struct ip *ip,
 
 	/* Check to see if the other side added ENO per
 	   Section 3.2 of draft-ietf-tcpinc-tcpeno-00. */
-	if (!rdr && !(eno = find_opt(tcp, TCPOPT_ENO))) {
+	if (!rdr && !(eno = find_eno(tcp))) {
 		xprintf(XP_DEBUG, "No ENO option found in expected INIT1\n");
 		tc->tc_state = STATE_DISABLED;
 
@@ -2875,8 +2916,8 @@ static int tcp_input_post(struct tc *tc, struct ip *ip, struct tcphdr *tcp)
 static int do_input_nextk1_sent(struct tc *tc, struct ip *ip,
 				struct tcphdr *tcp)
 {
-	struct tcpopt_eno *eno = find_opt(tcp, TCPOPT_ENO);
-	int len, i;
+	struct tcpopt_eno *eno = find_eno(tcp);
+	int len;
 
 	if (!eno) {
 		tc->tc_state = STATE_DISABLED;
@@ -2884,17 +2925,16 @@ static int do_input_nextk1_sent(struct tc *tc, struct ip *ip,
 		return DIVERT_ACCEPT;
 	}
 
-	len = eno->toe_len - 2;
+	len = eno->toe_len - sizeof(*eno);
 
 	assert(len >= 0);
 	check_app_support(tc, eno->toe_opts, len);
 
 	/* see if we can resume the session */
-	for (i = 0; i < len; i++) {
-		if (eno->toe_opts[i] == TC_RESUME) {
-			enable_encryption(tc);
-			return DIVERT_ACCEPT;
-		}
+	if (len > 0 && eno->toe_opts[len - 1]
+	               == (tc->tc_sess->ts_pub_spec | TC_OPT_VLEN)) {
+		enable_encryption(tc);
+		return DIVERT_ACCEPT;
 	}
 
 	/* nope */

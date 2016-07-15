@@ -290,6 +290,8 @@ static void compute_sid(struct tc *tc, struct stuff *out, int v)
 	assert(out->s_len + 1 <= sizeof(out->s_data));
 	memmove(out->s_data + 1, out->s_data, out->s_len);
 
+	assert(tc->tc_cipher_pkey.tcs_algo);
+
 	out->s_data[0] = tc->tc_cipher_pkey.tcs_algo | v;
 	out->s_len++;
 }
@@ -411,9 +413,10 @@ static int session_resume(struct tc *tc)
 	copy_stuff(&tc->tc_mk, &s->ts_mk);
 	copy_stuff(&tc->tc_nk, &s->ts_nk);
 
-	tc->tc_role	 = s->ts_role;
-	tc->tc_crypt_sym = crypt_new(s->ts_sym->cs_ctr);
-	tc->tc_crypt_pub = crypt_new(s->ts_pub->cp_ctr);
+	tc->tc_role	 	    = s->ts_role;
+	tc->tc_crypt_sym 	    = crypt_new(s->ts_sym->cs_ctr);
+	tc->tc_crypt_pub 	    = crypt_new(s->ts_pub->cp_ctr);
+	tc->tc_cipher_pkey.tcs_algo = s->ts_pub_spec;
 
 	return 1;
 }
